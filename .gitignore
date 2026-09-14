@@ -1,0 +1,37 @@
+# Credentials: commit templates only.
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+# Private calendar exports and user data.
+*.ics
+*.ical
+*.db
+*.db-*
+*.sqlite*
+# Keep all tools, downloads and caches inside the project.
+.tools/
+.cache/
+.tmp/
+.downloads/
+.wrangler/
+node_modules/
+vendor/
+bin/
+dist/
+.DS_Store
+# Local configuration and tool state.
+.*/
+# Internal documentation, prompts and logs stay local.
+docs/
+logs/
+prompts/
+*.log
+*.md
+!/README.md
