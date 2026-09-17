@@ -54,3 +54,14 @@ export interface QueueMessageLike<T> {
 export interface OutboundJobMessage {
   jobId: string;
 }
+
+/**
+ * Wrapper for the platform `fetch` global. Storing the global and invoking it
+ * as a property (`obj.fetch(...)`, `this.#fetch(...)`) throws
+ * `TypeError: Illegal invocation` in workerd, because the global must be called
+ * with its own receiver. Every layer that receives `fetch` as a value gets this
+ * wrapper instead of the global.
+ */
+export function platformFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return fetch(input, init);
+}

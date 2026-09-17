@@ -14,6 +14,7 @@ import type { SourceDefinition } from './calendar/sync.ts';
 import { readConfig, type AppConfig } from './config.ts';
 import { Repository } from './data/repository.ts';
 import type { OutboundJobMessage } from './platform.ts';
+import { platformFetch } from './platform.ts';
 import { TelegramClient } from './telegram/adapter.ts';
 import { createLogger, type Logger } from './util.ts';
 import {
@@ -45,7 +46,7 @@ function createCalendarSources(config: AppConfig): SourceDefinition[] {
 function createTelegramClient(config: AppConfig, logger: Logger): TelegramClient {
   return new TelegramClient({
     botToken: config.telegramBotToken,
-    fetch,
+    fetch: platformFetch,
     logger,
     timeoutMs: DEFAULT_FETCH_TIMEOUT_MS,
   });
@@ -98,14 +99,14 @@ function missingRuntimeBindings(env: Env): string[] {
   return missing;
 }
 
-function createDeps(env: Env, config: AppConfig): AppDeps {
+export function createDeps(env: Env, config: AppConfig): AppDeps {
   const logger = createRedactingLogger(config);
   return {
     repository: new Repository(env.DB),
     telegram: createTelegramClient(config, logger),
     queue: env.NOTIFICATIONS,
     parser: new IcalJsCalendarParser(),
-    fetch,
+    fetch: platformFetch,
     now: () => Date.now(),
     logger,
     sources: createCalendarSources(config),
