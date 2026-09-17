@@ -1,0 +1,24 @@
+{
+  "name": "ya-pr-bot-notificator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "launch-gate": "bash scripts/launch-gate.sh",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "typegen": "WRANGLER_SEND_METRICS=false wrangler types",
+    "build": "WRANGLER_SEND_METRICS=false wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "ical.js": "^2.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0",
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}

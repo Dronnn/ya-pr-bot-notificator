@@ -1,0 +1,59 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "build",
+  "share": "disabled",
+  "subagent_depth": 2,
+  "permission": {
+    "read": {
+      "*": "allow",
+      "**/.env*": "deny",
+      "**/.env.example": "allow",
+      "**/secrets/**": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      "**/.env*": "deny",
+      "**/.env.example": "allow",
+      "**/secrets/**": "deny"
+    },
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "lsp": "allow",
+    "task": "allow",
+    "skill": "allow",
+    "todowrite": "allow",
+    "question": "allow",
+    "doom_loop": "ask",
+    "external_directory": "ask",
+    "webfetch": "ask",
+    "websearch": "ask",
+    "bash": {
+      "*": "allow",
+      "*git add*": "ask",
+      "*git commit*": "ask",
+      "*git push*": "ask",
+      "*git pull*": "ask",
+      "*git fetch*": "ask",
+      "*git reset*": "ask",
+      "*git restore*": "ask",
+      "*git checkout*": "ask",
+      "*git clean*": "ask",
+      "*git rm*": "ask",
+      "rm *": "ask",
+      "* rm *": "ask",
+      "*npm install*": "ask",
+      "*npm uninstall*": "ask",
+      "*npm update*": "ask",
+      "*npm ci*": "ask",
+      "curl *": "ask",
+      "wget *": "ask",
+      "ssh *": "ask",
+      "scp *": "ask",
+      "gh *": "ask",
+      "*wrangler *": "ask",
+      "*wrangler types*": "allow",
+      "*wrangler deploy --dry-run*": "allow"
+    }
+  }
+}

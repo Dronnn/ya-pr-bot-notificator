@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ya-pr-bot-notificator",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-14",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ya-pr-bot-notificator",
+      "database_id": "4e81b90d-83c2-4522-b0b5-63f1afcb5aa6",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "NOTIFICATIONS",
+        "queue": "ya-pr-bot-notificator-notifications"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "ya-pr-bot-notificator-notifications",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_concurrency": 1
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    }
+  },
+  "vars": {}
+}
