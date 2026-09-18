@@ -197,9 +197,9 @@ describe('Timezone migration 0007', () => {
     applyMigrations(db);
     db.exec(
       `INSERT INTO users (
-         telegram_user_id, chat_id, course, reminder_offset_minutes,
+         telegram_user_id, chat_id, course,
          active, revision, created_at_ms, updated_at_ms
-       ) VALUES (1, 1, 'basic', 30, 1, 1, 0, 0)`,
+       ) VALUES (1, 1, 'basic', 1, 1, 0, 0)`,
     );
     for (const bad of ['', '   ', '\t', '\n', ' \t\n ']) {
       assert.throws(
@@ -216,15 +216,25 @@ describe('Timezone migration 0007', () => {
 
   it('upgrade maps every existing user to Moscow and preserves all other state', async () => {
     const db = createSqliteD1();
-    const pre0007 = migrationFiles().filter((name) => name !== '0007_user_time_zone.sql');
+    const pre0007 = migrationFiles().filter(
+      (name) => name !== '0007_user_time_zone.sql' && name !== '0008_user_reminder_rules.sql',
+    );
     applyMigrations(db, pre0007);
 
     const repository = new Repository(db);
     const now = 1_700_000_000_000;
+    // Seed the pre-0007/0008 shape directly: the legacy schema carries a single
+    // `reminder_offset_minutes` and no `time_zone`, which the repository can no
+    // longer write through `activateUser`.
+    db.exec(
+      `INSERT INTO users (
+         telegram_user_id, chat_id, course, reminder_offset_minutes,
+         active, revision, created_at_ms, updated_at_ms
+       ) VALUES
+         (11, 11, 'extended', 1440, 1, 3, ${now}, ${now}),
+         (12, 12, 'basic', 30, 1, 1, ${now}, ${now})`,
+    );
     await repository.recordCommandUpdate(11, 11, 5, now);
-    await repository.activateUser(11, 11, now, 5);
-    await repository.setUserCourse(11, 'extended', now, 5);
-    await repository.setUserReminderOffset(11, 1440, now, 5);
     await repository.insertCommandJob({
       id: 'job-11',
       telegramUserId: 11,
@@ -236,7 +246,6 @@ describe('Timezone migration 0007', () => {
       expectedRevision: 3,
       sourceUpdateId: 5,
     });
-    await repository.activateUser(12, 12, now);
     db.exec(
       `INSERT INTO delivery_ledger (dedup_key, occurrence_id, telegram_user_id, sent_at_ms)
        VALUES ('rem:12:basic:a#1:30', 'basic:a#1', 12, ${now})`,
@@ -256,18 +265,21 @@ describe('Timezone migration 0007', () => {
       ledger: db.database.prepare('SELECT * FROM delivery_ledger ORDER BY dedup_key').all() as unknown[],
       state: db.database.prepare('SELECT * FROM user_command_state ORDER BY telegram_user_id').all() as unknown[],
     });
-    const withoutTimeZone = (rows: unknown[]): unknown[] =>
+    // 0008 drops the legacy single-offset column and adds the rule table, so an
+    // upgraded row keeps only the columns 0007 leaves behind.
+    const withoutUpgradedColumns = (rows: unknown[]): unknown[] =>
       rows.map((row) => {
         const copy: Record<string, unknown> = { ...(row as Record<string, unknown>) };
         delete copy.time_zone;
+        delete copy.reminder_offset_minutes;
         return copy;
       });
     const before = snapshot();
 
-    applyMigrations(db, ['0007_user_time_zone.sql']);
+    applyMigrations(db, ['0007_user_time_zone.sql', '0008_user_reminder_rules.sql']);
 
     const after = snapshot();
-    assert.deepEqual(withoutTimeZone(after.users), withoutTimeZone(before.users));
+    assert.deepEqual(withoutUpgradedColumns(after.users), withoutUpgradedColumns(before.users));
     assert.deepEqual(after.jobs, before.jobs, 'queued jobs and delivery identities survive');
     assert.deepEqual(after.ledger, before.ledger, 'the delivery ledger survives');
     assert.deepEqual(after.state, before.state, 'command ordering state survives');
@@ -277,6 +289,21 @@ describe('Timezone migration 0007', () => {
       }[]
     ).map((row) => String(row.time_zone));
     assert.deepEqual(zones, ['Europe/Moscow', 'Europe/Moscow'], 'every existing user maps to Moscow');
+    const rules = db.database
+      .prepare('SELECT telegram_user_id, offset_minutes FROM user_reminder_offsets ORDER BY telegram_user_id, offset_minutes DESC')
+      .all() as { telegram_user_id: unknown; offset_minutes: unknown }[];
+    assert.deepEqual(
+      rules.map((row) => [Number(row.telegram_user_id), Number(row.offset_minutes)]),
+      [
+        [11, 1440],
+        [11, 60],
+        [11, 5],
+        [12, 1440],
+        [12, 60],
+        [12, 5],
+      ],
+      'every existing user receives exactly the three standard rules',
+    );
     db.close();
   });
 });
@@ -336,8 +363,8 @@ describe('Timezone onboarding', () => {
       assert.equal(user?.timeZone, expected);
       assert.equal(
         await harness.repository.planDueReminders(now, now + EXPANSION_HORIZON_MS),
-        1,
-        `${data}: onboarding completion enables reminder planning`,
+        2,
+        `${data}: onboarding completion enables planning for the due default rules`,
       );
       const planned = allJobs(harness).find((job) => job.kind === 'reminder');
       assert.equal(planned?.status, 'pending');
@@ -476,7 +503,7 @@ describe('Timezone settings and rendering', () => {
     assert.match(payload, /tz:Europe\/Moscow/);
     assert.match(payload, /tz:Asia\/Yerevan/);
     assert.match(payload, /course:basic/);
-    assert.match(payload, /reminder:1440/);
+    assert.match(payload, /rm:menu/);
     await deliver(harness, jobId);
     assert.match(sentTexts(harness).at(-1) ?? '', /Настройки:/);
     assert.match(sentTexts(harness).at(-1) ?? '', /Часовой пояс: Asia\/Yerevan/);

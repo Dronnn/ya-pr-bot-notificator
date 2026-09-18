@@ -11,11 +11,18 @@
 
 import type { D1DatabaseLike, D1ResultLike, D1StatementLike } from '../platform.ts';
 import type { OccurrenceStatus } from '../domain/calendar.ts';
-import type { Course, ReminderOffsetMinutes } from '../domain/notification-policy.ts';
+import {
+  DEFAULT_REMINDER_OFFSETS,
+  MAX_REMINDER_RULES_PER_USER,
+  MAX_REMINDER_OFFSET_MINUTES,
+  isValidReminderOffset,
+  normalizeReminderOffsets,
+  type Course,
+  type ReminderOffsetMinutes,
+} from '../domain/notification-policy.ts';
 import {
   assertSafeInteger,
   MAX_D1_BATCH_STATEMENTS,
-  MAX_REMINDER_OFFSET_MINUTES,
   MAX_SQL_PARAMS,
   MS_PER_MINUTE,
   SENT_REMINDER_RETENTION_MS,
@@ -138,7 +145,6 @@ export interface UserRecord {
   telegramUserId: number;
   chatId: number;
   course: Course;
-  reminderOffsetMinutes: ReminderOffsetMinutes;
   /** Stored IANA timezone; null means onboarding is incomplete. */
   timeZone: string | null;
   active: boolean;
@@ -272,7 +278,12 @@ export interface JobContext {
   userFound: boolean;
   userActive: boolean;
   userCourse: Course | null;
-  userReminderOffsetMinutes: number | null;
+  /**
+   * Whether the job's `reminderOffsetMinutes` is still one of the recipient's
+   * current rules. A reminder is cancelled when its rule was removed after the
+   * job was planned.
+   */
+  userHasReminderOffset: boolean;
   /** Live stored timezone of the recipient (null when none is chosen yet). */
   userTimeZone: string | null;
   /** Current `users.revision` (null when the recipient has no user row). */
@@ -380,10 +391,14 @@ interface UserRow {
   telegram_user_id: unknown;
   chat_id: unknown;
   course: unknown;
-  reminder_offset_minutes: unknown;
   time_zone: unknown;
   active: unknown;
   revision: unknown;
+}
+
+/** Row read by `listReminderOffsets`. */
+interface ReminderOffsetRow {
+  offset_minutes: unknown;
 }
 
 /** Row read by `getSource`; each field is narrowed in the mapper. */
@@ -419,7 +434,7 @@ interface JobContextRow {
   user_id: unknown;
   user_active: unknown;
   user_course: unknown;
-  user_offset: unknown;
+  user_has_offset: unknown;
   user_time_zone: unknown;
   user_revision: unknown;
   occ_id: unknown;
@@ -473,7 +488,7 @@ function toJobContext(row: JobContextRow): JobContext {
     userFound: row.user_id !== null,
     userActive: Number(row.user_active) === 1,
     userCourse: toCourse(nullableString(row.user_course)),
-    userReminderOffsetMinutes: nullableNumber(row.user_offset),
+    userHasReminderOffset: Number(row.user_has_offset) > 0,
     userTimeZone: nullableString(row.user_time_zone),
     userRevision: nullableNumber(row.user_revision),
     occurrenceFound: row.occ_id !== null,
@@ -623,8 +638,6 @@ export class Repository {
       telegramUserId: Number(row.telegram_user_id),
       chatId: Number(row.chat_id),
       course: toCourse(String(row.course)) ?? 'basic',
-      reminderOffsetMinutes:
-        Number(row.reminder_offset_minutes) === 1440 ? 1440 : (30 as ReminderOffsetMinutes),
       timeZone: row.time_zone === null || row.time_zone === undefined ? null : String(row.time_zone),
       active: Number(row.active) === 1,
       revision: Number(row.revision),
@@ -637,12 +650,18 @@ export class Repository {
    * `/start` with the same chat leaves revision and updated_at untouched, so a
    * webhook retry cannot increment the revision twice.
    *
-   * FIX-ORDER: when `commandUpdateId` is provided, both the insert and the
-   * conflict update run behind `COMMAND_CURRENT`, so a suspended older `/start`
-   * can neither insert a user nor reactivate one that a newer command already
-   * deactivated. The guarded overload returns null when the write was rejected
-   * and no user row exists, making the rejection observable without throwing
-   * (the caller must not enqueue a reply then).
+   * FIX-ORDER: when `commandUpdateId` is provided, both the fresh insert and
+   * the reactivation update run behind `COMMAND_CURRENT`, so a suspended older
+   * `/start` can neither insert a user nor reactivate one that a newer command
+   * already deactivated. The guarded overload returns null when the write was
+   * rejected and no user row exists, making the rejection observable without
+   * throwing (the caller must not enqueue a reply then).
+   *
+   * The standard rule set is seeded ONLY on the fresh insert; reactivating an
+   * existing row goes through a separate guarded UPDATE that never touches
+   * `user_reminder_offsets`. A user who cleared every rule therefore keeps an
+   * empty set across `/stop` and `/start`. `INSERT OR IGNORE` reports 0 changes
+   * when the row already exists, which is what distinguishes the two paths.
    */
   async activateUser(
     telegramUserId: number,
@@ -661,32 +680,40 @@ export class Repository {
     now: number,
     commandUpdateId?: number,
   ): Promise<UserRecord | null> {
-    const guard = [commandUpdateId ?? null, telegramUserId, commandUpdateId ?? null, commandUpdateId ?? null] as const;
-    await this.#changes(
-      `INSERT INTO users (telegram_user_id, chat_id, course, reminder_offset_minutes, active, revision, created_at_ms, updated_at_ms)
-       SELECT ?, ?, 'basic', 30, 1, 1, ?, ?
-       WHERE ${COMMAND_CURRENT}
-       ON CONFLICT(telegram_user_id) DO UPDATE SET
-         chat_id = excluded.chat_id,
-         active = 1,
-         revision = CASE
-           WHEN users.active = 0 OR users.chat_id <> excluded.chat_id
-             THEN users.revision + 1
-           ELSE users.revision
-         END,
-         updated_at_ms = CASE
-           WHEN users.active = 0 OR users.chat_id <> excluded.chat_id
-             THEN excluded.updated_at_ms
-           ELSE users.updated_at_ms
-         END
+    const guard = this.#commandGuard(telegramUserId, commandUpdateId);
+    const inserted = await this.#changes(
+      `INSERT OR IGNORE INTO users (telegram_user_id, chat_id, course, active, revision, created_at_ms, updated_at_ms)
+       SELECT ?, ?, 'basic', 1, 1, ?, ?
        WHERE ${COMMAND_CURRENT}`,
       telegramUserId,
       chatId,
       now,
       now,
       ...guard,
-      ...guard,
     );
+    if (inserted === 0) {
+      // Existing row: reactivate it without re-adding reminder rules.
+      await this.#changes(
+        `UPDATE users SET
+           chat_id = ?,
+           active = 1,
+           revision = CASE
+             WHEN active = 0 OR chat_id <> ? THEN revision + 1
+             ELSE revision
+           END,
+           updated_at_ms = CASE
+             WHEN active = 0 OR chat_id <> ? THEN ?
+             ELSE updated_at_ms
+           END
+         WHERE telegram_user_id = ? AND ${COMMAND_CURRENT}`,
+        chatId,
+        chatId,
+        chatId,
+        now,
+        telegramUserId,
+        ...guard,
+      );
+    }
     const user = await this.getUser(telegramUserId);
     if (user === null) {
       if (commandUpdateId !== undefined) {
@@ -694,7 +721,46 @@ export class Repository {
       }
       throw new Error('activateUser failed to persist the user');
     }
+    if (inserted > 0) {
+      await this.#ensureDefaultReminderOffsets(telegramUserId, now, commandUpdateId);
+    }
     return user;
+  }
+
+  /**
+   * Seeds the standard reminder rules for a freshly inserted user. Called only
+   * from the insert branch of `activateUser`, so reactivating an existing user
+   * (including one who cleared every rule) never restores defaults. The
+   * insert-or-ignore keeps a retried insert idempotent. Guarded by
+   * `COMMAND_CURRENT` when a command update id is given.
+   */
+  async #ensureDefaultReminderOffsets(
+    telegramUserId: number,
+    now: number,
+    commandUpdateId?: number,
+  ): Promise<void> {
+    const tuples = DEFAULT_REMINDER_OFFSETS.map(() => '(?, ?, ?)').join(', ');
+    const values: unknown[] = [];
+    for (const offset of DEFAULT_REMINDER_OFFSETS) {
+      values.push(telegramUserId, offset, now);
+    }
+    values.push(...this.#commandGuard(telegramUserId, commandUpdateId));
+    await this.#changes(
+      `INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
+       SELECT * FROM (VALUES ${tuples}) WHERE ${COMMAND_CURRENT}`,
+      ...values,
+    );
+  }
+
+  /** Current rule set of a user, largest lead time first. Empty when none. */
+  async listReminderOffsets(telegramUserId: number): Promise<number[]> {
+    const rows = await this.#rows<ReminderOffsetRow>(
+      `SELECT offset_minutes FROM user_reminder_offsets
+       WHERE telegram_user_id = ?
+       ORDER BY offset_minutes DESC`,
+      telegramUserId,
+    );
+    return rows.map((row) => Number(row.offset_minutes));
   }
 
   /** Finding 3 (repo part): true when a command job with this dedup key exists. */
@@ -852,26 +918,197 @@ export class Repository {
     return changes > 0;
   }
 
-  /** FIX-ORDER: guarded counterpart of `setUserReminderOffset` (see `setUserCourse`). */
-  async setUserReminderOffset(
+  /** Bind values of `COMMAND_CURRENT` for a user and optional command update. */
+  #commandGuard(telegramUserId: number, commandUpdateId?: number): readonly unknown[] {
+    return [
+      commandUpdateId ?? null,
+      telegramUserId,
+      commandUpdateId ?? null,
+      commandUpdateId ?? null,
+    ];
+  }
+
+  /** One guarded, bounded insert-or-ignore of a single reminder rule. */
+  #insertReminderOffsetStatement(
+    telegramUserId: number,
+    offset: number,
+    now: number,
+    commandUpdateId?: number,
+  ): D1StatementLike {
+    return this.#statement(
+      `INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
+       SELECT ?, ?, ? WHERE ${COMMAND_CURRENT}
+         AND (SELECT COUNT(*) FROM user_reminder_offsets WHERE telegram_user_id = ?) < ?`,
+      telegramUserId,
+      offset,
+      now,
+      ...this.#commandGuard(telegramUserId, commandUpdateId),
+      telegramUserId,
+      MAX_REMINDER_RULES_PER_USER,
+    );
+  }
+
+  /** Guarded statement that bumps `users.revision` only when `extraPredicate` holds. */
+  #revisionBumpStatement(
+    telegramUserId: number,
+    now: number,
+    commandUpdateId: number | undefined,
+    extraPredicate: string,
+    extraParams: readonly unknown[],
+  ): D1StatementLike {
+    return this.#statement(
+      `UPDATE users SET revision = revision + 1, updated_at_ms = ?
+       WHERE telegram_user_id = ? AND ${extraPredicate} AND ${COMMAND_CURRENT}`,
+      now,
+      telegramUserId,
+      ...extraParams,
+      ...this.#commandGuard(telegramUserId, commandUpdateId),
+    );
+  }
+
+  /**
+   * Replaces the whole rule set atomically. Invalid values, more than
+   * `MAX_REMINDER_RULES_PER_USER` entries or duplicates are rejected before any
+   * statement runs (duplicates are collapsed, not rejected). The user revision
+   * is bumped in the same batch so an older settings reply is superseded, and
+   * every statement is guarded by `COMMAND_CURRENT` when a command update id is
+   * given. Returns whether the stored set changed.
+   */
+  async setUserReminderOffsets(
+    telegramUserId: number,
+    offsets: readonly number[],
+    now: number,
+    commandUpdateId?: number,
+  ): Promise<boolean> {
+    const normalized = normalizeReminderOffsets(offsets);
+    if (normalized === null) {
+      return false;
+    }
+    const statements: D1StatementLike[] = [
+      this.#revisionBumpStatement(telegramUserId, now, commandUpdateId, '1 = 1', []),
+      this.#statement(
+        `DELETE FROM user_reminder_offsets
+         WHERE telegram_user_id = ? AND ${COMMAND_CURRENT}`,
+        telegramUserId,
+        ...this.#commandGuard(telegramUserId, commandUpdateId),
+      ),
+    ];
+    for (const offset of normalized) {
+      statements.push(
+        this.#insertReminderOffsetStatement(telegramUserId, offset, now, commandUpdateId),
+      );
+    }
+    const results = await this.#batchAtomic(statements);
+    return results.some(
+      (result) => reportedChanges(result as D1ResultLike<never>) > 0,
+    );
+  }
+
+  /**
+   * Adds one rule if it is valid, not already present and the user is below the
+   * per-user cap. Returns true only when a new rule row was inserted.
+   */
+  async addReminderOffset(
     telegramUserId: number,
     offset: ReminderOffsetMinutes,
     now: number,
     commandUpdateId?: number,
   ): Promise<boolean> {
-    const changes = await this.#changes(
-      `UPDATE users SET reminder_offset_minutes = ?, revision = revision + 1, updated_at_ms = ?
-       WHERE telegram_user_id = ? AND reminder_offset_minutes <> ? AND ${COMMAND_CURRENT}`,
-      offset,
-      now,
-      telegramUserId,
-      offset,
-      commandUpdateId ?? null,
-      telegramUserId,
-      commandUpdateId ?? null,
-      commandUpdateId ?? null,
-    );
-    return changes > 0;
+    if (!isValidReminderOffset(offset)) {
+      return false;
+    }
+    const results = await this.#batchAtomic([
+      this.#revisionBumpStatement(
+        telegramUserId,
+        now,
+        commandUpdateId,
+        `(SELECT COUNT(*) FROM user_reminder_offsets WHERE telegram_user_id = ?) < ?
+           AND NOT EXISTS (
+             SELECT 1 FROM user_reminder_offsets
+             WHERE telegram_user_id = ? AND offset_minutes = ?
+           )`,
+        [telegramUserId, MAX_REMINDER_RULES_PER_USER, telegramUserId, offset],
+      ),
+      this.#insertReminderOffsetStatement(telegramUserId, offset, now, commandUpdateId),
+    ]);
+    return reportedChanges(results[1] as D1ResultLike<never> | undefined) > 0;
+  }
+
+  /**
+   * Removes one rule. Idempotent: a missing rule changes nothing and reports
+   * false, so a stale or repeated callback never mutates.
+   */
+  async removeReminderOffset(
+    telegramUserId: number,
+    offset: ReminderOffsetMinutes,
+    now: number,
+    commandUpdateId?: number,
+  ): Promise<boolean> {
+    if (!isValidReminderOffset(offset)) {
+      return false;
+    }
+    const results = await this.#batchAtomic([
+      this.#revisionBumpStatement(
+        telegramUserId,
+        now,
+        commandUpdateId,
+        'EXISTS (SELECT 1 FROM user_reminder_offsets WHERE telegram_user_id = ? AND offset_minutes = ?)',
+        [telegramUserId, offset],
+      ),
+      this.#statement(
+        `DELETE FROM user_reminder_offsets
+         WHERE telegram_user_id = ? AND offset_minutes = ? AND ${COMMAND_CURRENT}`,
+        telegramUserId,
+        offset,
+        ...this.#commandGuard(telegramUserId, commandUpdateId),
+      ),
+    ]);
+    return reportedChanges(results[1] as D1ResultLike<never> | undefined) > 0;
+  }
+
+  /**
+   * Renames one rule atomically. The guarded UPDATE only runs while the source
+   * rule exists and the target does not, so a failed edit (missing source,
+   * target already present, stale command) leaves the source rule in place:
+   * there is no window in which the old rule is removed before the new one is
+   * written. Returns true only when the row actually moved.
+   */
+  async editReminderOffset(
+    telegramUserId: number,
+    from: ReminderOffsetMinutes,
+    to: ReminderOffsetMinutes,
+    now: number,
+    commandUpdateId?: number,
+  ): Promise<boolean> {
+    if (!isValidReminderOffset(from) || !isValidReminderOffset(to) || from === to) {
+      return false;
+    }
+    const sourceExists =
+      'EXISTS (SELECT 1 FROM user_reminder_offsets WHERE telegram_user_id = ? AND offset_minutes = ?)';
+    const targetMissing =
+      'NOT EXISTS (SELECT 1 FROM user_reminder_offsets WHERE telegram_user_id = ? AND offset_minutes = ?)';
+    const results = await this.#batchAtomic([
+      this.#revisionBumpStatement(
+        telegramUserId,
+        now,
+        commandUpdateId,
+        `${sourceExists} AND ${targetMissing}`,
+        [telegramUserId, from, telegramUserId, to],
+      ),
+      this.#statement(
+        `UPDATE user_reminder_offsets SET offset_minutes = ?
+         WHERE telegram_user_id = ? AND offset_minutes = ?
+           AND ${targetMissing}
+           AND ${COMMAND_CURRENT}`,
+        to,
+        telegramUserId,
+        from,
+        telegramUserId,
+        to,
+        ...this.#commandGuard(telegramUserId, commandUpdateId),
+      ),
+    ]);
+    return reportedChanges(results[1] as D1ResultLike<never> | undefined) > 0;
   }
 
   /**
@@ -1462,13 +1699,19 @@ export class Repository {
    * A cancelled row is still revived, and a material revision change still
    * reschedules from `send_at_ms` and resets attempts/error exactly as before.
    *
+   * One job per (user, occurrence, rule): the join on `user_reminder_offsets`
+   * expands a user's whole set, so zero rules produce no work, one rule one job
+   * and N rules N jobs. The dedup key carries the stable offset, so a removed
+   * rule's job can never collide with a different rule's job and a re-added rule
+   * still dedups against the ledger.
+   *
    * Returns the number of rows actually inserted or updated.
    */
   async planDueReminders(now: number, horizonEndMs: number): Promise<number> {
     // Job id and dedup key must stay in sync: one job per user/occurrence/offset.
     const dedupKey =
-      "'rem:' || u.telegram_user_id || ':' || o.id || ':' || u.reminder_offset_minutes";
-    const sendAtMs = `o.starts_at_ms - u.reminder_offset_minutes * ${MS_PER_MINUTE}`;
+      "'rem:' || u.telegram_user_id || ':' || o.id || ':' || r.offset_minutes";
+    const sendAtMs = `o.starts_at_ms - r.offset_minutes * ${MS_PER_MINUTE}`;
     const dueWindowEndMs = now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE;
     return this.#changes(
       `INSERT INTO outbound_jobs (
@@ -1478,7 +1721,7 @@ export class Repository {
        )
        SELECT
          ${dedupKey},
-         'reminder', u.telegram_user_id, u.chat_id, o.id, u.reminder_offset_minutes,
+         'reminder', u.telegram_user_id, u.chat_id, o.id, r.offset_minutes,
          ${sendAtMs},
          ${sendAtMs},
          'pending', 0, o.revision,
@@ -1486,6 +1729,7 @@ export class Repository {
          ?, ?
        FROM occurrences o
        JOIN users u ON u.course = o.course
+       JOIN user_reminder_offsets r ON r.telegram_user_id = u.telegram_user_id
        WHERE u.active = 1
          AND u.time_zone IS NOT NULL
          AND o.status = 'confirmed'
@@ -1537,13 +1781,20 @@ export class Repository {
        SET status = 'cancelled', lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?
        WHERE status IN ('pending', 'enqueued')
          AND kind = 'reminder'
-         AND NOT EXISTS (
-           SELECT 1 FROM occurrences o
-           JOIN users u ON u.telegram_user_id = outbound_jobs.telegram_user_id
-           WHERE o.id = outbound_jobs.occurrence_id
-             AND o.status = 'confirmed'
-             AND u.active = 1
-             AND u.course = o.course
+         AND (
+           NOT EXISTS (
+             SELECT 1 FROM occurrences o
+             JOIN users u ON u.telegram_user_id = outbound_jobs.telegram_user_id
+             WHERE o.id = outbound_jobs.occurrence_id
+               AND o.status = 'confirmed'
+               AND u.active = 1
+               AND u.course = o.course
+           )
+           OR NOT EXISTS (
+             SELECT 1 FROM user_reminder_offsets r
+             WHERE r.telegram_user_id = outbound_jobs.telegram_user_id
+               AND r.offset_minutes = outbound_jobs.reminder_offset_minutes
+           )
          )`,
       now,
     );
@@ -1627,11 +1878,12 @@ export class Repository {
          (SELECT active FROM users
            WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_active,
          (SELECT course FROM users
-           WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_course,
-         (SELECT reminder_offset_minutes FROM users
-           WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_offset,
+            WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_course,
+         (SELECT COUNT(*) FROM user_reminder_offsets
+            WHERE telegram_user_id = outbound_jobs.telegram_user_id
+              AND offset_minutes = outbound_jobs.reminder_offset_minutes) AS user_has_offset,
          (SELECT time_zone FROM users
-           WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_time_zone,
+            WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_time_zone,
          (SELECT revision FROM users
            WHERE telegram_user_id = outbound_jobs.telegram_user_id) AS user_revision,
          (SELECT id FROM occurrences

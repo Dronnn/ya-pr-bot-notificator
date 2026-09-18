@@ -995,12 +995,13 @@ async function seedTargetScenario(
   for (let userId = 1; userId <= basicRecipients; userId += 1) {
     await repository.activateUser(userId, userId, startMs);
     await repository.setUserTimeZone(userId, 'Europe/Moscow', startMs);
+    await repository.setUserReminderOffsets(userId, [30], startMs);
   }
   for (let userId = basicRecipients + 1; userId <= options.recipients; userId += 1) {
     await repository.activateUser(userId, userId, startMs);
     await repository.setUserTimeZone(userId, 'Europe/Moscow', startMs);
     await repository.setUserCourse(userId, 'extended', startMs);
-    await repository.setUserReminderOffset(userId, 1440, startMs);
+    await repository.setUserReminderOffsets(userId, [1440], startMs);
   }
   await repository.upsertOccurrences(
     [

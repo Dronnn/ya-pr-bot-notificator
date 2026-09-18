@@ -295,7 +295,7 @@ describe('Audit 8: inactive senders stay inactive', () => {
     const before = await harness.repository.getUser(USER_ID);
     const jobsBefore = harness.queue.batches.flat().length;
 
-    await handleUpdate(callbackUpdate(3, 'reminder:1440'), deps);
+    await handleUpdate(callbackUpdate(3, 'rm:t:1440'), deps);
 
     assert.deepEqual(await harness.repository.getUser(USER_ID), before);
     assert.equal(harness.queue.batches.flat().length, jobsBefore, 'no reply job may be created');

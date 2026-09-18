@@ -46,8 +46,14 @@ describe('calculateReminderAt', () => {
     assert.equal(calculateReminderAt(DAY, 1440), 0);
   });
 
-  it('rejects offsets that are not 30 or 1440 via runtime cast', () => {
-    for (const offset of [0, 15, 60, 1441, 30.5, -30]) {
+  it('accepts any integer offset from 1 to 43200 minutes', () => {
+    for (const offset of [1, 5, 15, 30, 60, 90, 1440, 10_080, 43_200]) {
+      assert.equal(calculateReminderAt(DAY, offset), DAY - offset * MINUTE);
+    }
+  });
+
+  it('rejects zero, negative, fractional and out-of-range offsets via runtime cast', () => {
+    for (const offset of [0, -30, 30.5, 43_201, 1_000_000]) {
       assert.throws(
         () => calculateReminderAt(0, offset as unknown as ReminderOffsetMinutes),
         RangeError,

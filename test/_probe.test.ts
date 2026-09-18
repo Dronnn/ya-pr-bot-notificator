@@ -28,12 +28,12 @@ describe('sqlite shim', () => {
     await assert.rejects(
       db.batch([
         db.prepare(
-          `INSERT INTO users (telegram_user_id, chat_id, course, reminder_offset_minutes, active, revision, created_at_ms, updated_at_ms)
-           VALUES (1, 1, 'basic', 30, 1, 1, 0, 0)`,
+          `INSERT INTO users (telegram_user_id, chat_id, course, active, revision, created_at_ms, updated_at_ms)
+           VALUES (1, 1, 'basic', 1, 1, 0, 0)`,
         ),
         db.prepare(
-          `INSERT INTO users (telegram_user_id, chat_id, course, reminder_offset_minutes, active, revision, created_at_ms, updated_at_ms)
-           VALUES (1, 1, 'basic', 30, 1, 1, 0, 0)`,
+          `INSERT INTO users (telegram_user_id, chat_id, course, active, revision, created_at_ms, updated_at_ms)
+           VALUES (1, 1, 'basic', 1, 1, 0, 0)`,
         ),
       ]),
     );

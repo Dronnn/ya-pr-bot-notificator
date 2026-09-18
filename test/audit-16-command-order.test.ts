@@ -215,9 +215,9 @@ describe('Audit 16 (F4): command reply ordering survives queue reordering', () =
     assert.equal((await harness.repository.getUser(USER_ID))?.revision, revisionAfterFirst);
 
     // Duplicate callback: same update_id twice → single job.
-    await handleUpdate(callbackUpdate(11, 'reminder:30'), deps);
+    await handleUpdate(callbackUpdate(11, 'rm:menu'), deps);
     const jobsAfterCallback = queuedJobIds(harness).length;
-    await handleUpdate(callbackUpdate(11, 'reminder:30'), deps);
+    await handleUpdate(callbackUpdate(11, 'rm:menu'), deps);
     assert.equal(queuedJobIds(harness).length, jobsAfterCallback);
   });
 
@@ -607,7 +607,7 @@ describe('Audit 16 (FIX-ORDER): SQL guards make stale mutations observably no-op
     const created = await harness.repository.activateUser(USER_ID, USER_ID, now, 11);
     assert.equal(created?.revision, 1, 'same-update guarded activation applies');
     await harness.repository.setUserCourse(USER_ID, 'extended', now, 11);
-    await harness.repository.setUserReminderOffset(USER_ID, 1440, now, 11);
+    await harness.repository.setUserReminderOffsets(USER_ID, [1440], now, 11);
     await harness.repository.insertCommandJob({
       id: 'job-11',
       telegramUserId: USER_ID,
@@ -623,7 +623,7 @@ describe('Audit 16 (FIX-ORDER): SQL guards make stale mutations observably no-op
     const jobsBefore = allJobs(harness).map((job) => [job.id, job.status]);
 
     assert.equal(await harness.repository.setUserCourse(USER_ID, 'basic', now, 10), false);
-    assert.equal(await harness.repository.setUserReminderOffset(USER_ID, 30, now, 10), false);
+    assert.equal(await harness.repository.setUserReminderOffsets(USER_ID, [30], now, 10), false);
     assert.equal(await harness.repository.deactivateUser(USER_ID, now, 10), false);
     assert.equal(await harness.repository.cancelPendingJobsForUser(USER_ID, now, 10), 0);
     assert.deepEqual(

@@ -16,7 +16,7 @@ import {
 import { countRows } from './helpers/d1-sqlite.ts';
 import { createThrowingParser, textResponse } from './helpers/fakes.ts';
 import { createHarness, schedulerDeps, syncDeps } from './helpers/harness.ts';
-import { EMPTY_ICS, occurrence, onboardUser } from './helpers/seed.ts';
+import { EMPTY_ICS, occurrence, onboardUser, seedReminderOffsets } from './helpers/seed.ts';
 
 function event(startsAtMs: number, overrides: Partial<ParsedEvent> = {}): ParsedEvent {
   return {
@@ -585,6 +585,7 @@ describe('horizon advancement after 304', () => {
     const harness = createHarness({ now: start });
     await harness.repository.activateUser(111, 111, start);
     onboardUser(harness, 111);
+    seedReminderOffsets(harness, 111, [30]);
 
     harness.setHandler((_url, init) => {
       const headers = init?.headers as Record<string, string> | undefined;

@@ -12,7 +12,24 @@
 
 export type Course = 'basic' | 'extended';
 
-export type ReminderOffsetMinutes = 30 | 1440;
+/** A single reminder lead time in minutes before the occurrence start. */
+export type ReminderOffsetMinutes = number;
+
+/** Smallest accepted lead time: one minute. Zero would collide with the start. */
+export const MIN_REMINDER_OFFSET_MINUTES = 1;
+/**
+ * Largest accepted lead time: thirty days. This is deliberately the same
+ * 30-day span the calendar horizon covers, so the planner's due window never
+ * exceeds the materialized occurrences and no rule can point outside them.
+ */
+export const MAX_REMINDER_OFFSET_MINUTES = 43_200;
+/** Upper bound on the number of rules one user may keep enabled at once. */
+export const MAX_REMINDER_RULES_PER_USER = 100;
+/**
+ * Standard rule set every user starts with (and every pre-rules user was
+ * migrated to): one day, one hour and five minutes before the start.
+ */
+export const DEFAULT_REMINDER_OFFSETS: readonly number[] = [1440, 60, 5];
 
 export type SkipReason =
   | 'inactive'
@@ -41,8 +58,39 @@ export interface DeliveryInput {
 
 const MINUTE_MS = 60_000;
 
-/** Every value ReminderOffsetMinutes may hold. */
-const VALID_OFFSET_MINUTES: readonly ReminderOffsetMinutes[] = [30, 1440];
+/**
+ * Whether `value` is a valid reminder lead time: an integer in
+ * [MIN_REMINDER_OFFSET_MINUTES, MAX_REMINDER_OFFSET_MINUTES].
+ */
+export function isValidReminderOffset(value: unknown): value is ReminderOffsetMinutes {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= MIN_REMINDER_OFFSET_MINUTES &&
+    value <= MAX_REMINDER_OFFSET_MINUTES
+  );
+}
+
+/**
+ * Validates, de-duplicates and orders a candidate rule set (largest lead time
+ * first). Returns null when any value is invalid or the set exceeds
+ * `MAX_REMINDER_RULES_PER_USER`; never coerces.
+ */
+export function normalizeReminderOffsets(
+  values: readonly number[],
+): number[] | null {
+  if (!Array.isArray(values) || values.length > MAX_REMINDER_RULES_PER_USER) {
+    return null;
+  }
+  const unique = new Set<number>();
+  for (const value of values) {
+    if (!isValidReminderOffset(value)) {
+      return null;
+    }
+    unique.add(value);
+  }
+  return [...unique].sort((left, right) => right - left);
+}
 
 /**
  * Returns startsAtMs - offsetMinutes, in UTC epoch milliseconds.
@@ -54,9 +102,9 @@ export function calculateReminderAt(
   offsetMinutes: ReminderOffsetMinutes,
 ): number {
   assertTimeMs(startsAtMs, 'startsAtMs');
-  if (!VALID_OFFSET_MINUTES.includes(offsetMinutes)) {
+  if (!isValidReminderOffset(offsetMinutes)) {
     throw new RangeError(
-      `offsetMinutes must be 30 or 1440, got ${String(offsetMinutes)}`,
+      `offsetMinutes must be an integer in [${MIN_REMINDER_OFFSET_MINUTES}, ${MAX_REMINDER_OFFSET_MINUTES}], got ${String(offsetMinutes)}`,
     );
   }
   const reminderAtMs = startsAtMs - offsetMinutes * MINUTE_MS;

@@ -21,7 +21,14 @@ import {
 } from './helpers/simulation.ts';
 import { jsonResponse } from './helpers/fakes.ts';
 import { consumerDeps, createHarness, schedulerDeps, type Harness } from './helpers/harness.ts';
-import { makeQueueMessage, occurrence, onboardUser, seedDueJobs, seedSource } from './helpers/seed.ts';
+import {
+  makeQueueMessage,
+  occurrence,
+  onboardUser,
+  seedDueJobs,
+  seedReminderOffsets,
+  seedSource,
+} from './helpers/seed.ts';
 
 const MAX_BOUND_PARAMS = 100;
 
@@ -321,6 +328,7 @@ describe('end-to-end delivery', () => {
     for (let index = 1; index <= recipients; index += 1) {
       await harness.repository.activateUser(index, index, start);
       onboardUser(harness, index);
+      seedReminderOffsets(harness, index, [30]);
     }
     // A 30-minute reminder for an event starting in 31 minutes is not due at the
     // first cron tick; it becomes due exactly one tick (60s) later.

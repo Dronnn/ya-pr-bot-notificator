@@ -6,6 +6,8 @@
  * reason and acknowledged by the caller without side effects.
  */
 
+import { isValidReminderOffset } from '../domain/notification-policy.ts';
+
 export interface PrivateMessageUpdate {
   kind: 'message';
   updateId: number;
@@ -151,21 +153,34 @@ export function parseUpdate(payload: unknown): ParseUpdateResult {
 }
 
 /**
- * The complete, finite set of callback payloads the bot acts on. Anything
- * outside this list is acknowledged as an unknown action.
+ * The complete, finite set of fixed callback payloads the bot acts on. The
+ * offset-carrying `rm:t:`/`rm:del:`/`rm:edit:` payloads are validated by shape
+ * and range instead (see `isAllowedCallback`), because a user may keep an
+ * arbitrary set of lead times.
  */
 export const CALLBACK_ACTIONS: readonly string[] = [
   'course:basic',
   'course:extended',
-  'reminder:30',
-  'reminder:1440',
   'tz:Europe/Moscow',
   'tz:Asia/Yerevan',
+  'rm:menu',
+  'rm:add',
+  'rm:clear',
 ];
 
 const ALLOWED_CALLBACKS: ReadonlySet<string> = new Set(CALLBACK_ACTIONS);
+const REMINDER_CALLBACK_PATTERN = /^rm:(t|del|edit):(\d{1,7})$/;
 
-/** Exact membership of the allowlist; no prefix or pattern matching. */
+/** Whether `data` is a well-formed, in-range reminder-rule callback. */
+function isReminderCallback(data: string): boolean {
+  const match = REMINDER_CALLBACK_PATTERN.exec(data);
+  if (match === null) {
+    return false;
+  }
+  return isValidReminderOffset(Number(match[2]));
+}
+
+/** Exact membership plus the validated reminder-rule pattern. */
 export function isAllowedCallback(data: string): boolean {
-  return ALLOWED_CALLBACKS.has(data);
+  return ALLOWED_CALLBACKS.has(data) || isReminderCallback(data);
 }

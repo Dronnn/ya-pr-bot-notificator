@@ -105,7 +105,7 @@ async function cleanRun(payload: unknown): Promise<string> {
   const app = buildTestApp(harness);
   if (needsActive) {
     const data = (payload as { callback_query: { data: string } }).callback_query.data;
-    if (['course:basic', 'reminder:30'].includes(data)) {
+    if (['course:basic', 'rm:menu'].includes(data)) {
       await app.fetch(webhookRequest(messageUpdate(1, '/start')));
       harness.fetchSpy.calls.length = 0;
     }
@@ -135,7 +135,7 @@ async function failingThenRetry(payload: unknown, updateId: number): Promise<str
   const app0 = buildTestApp(harness);
   if (needsActive) {
     const data = (payload as { callback_query: { data: string } }).callback_query.data;
-    if (['course:basic', 'reminder:30'].includes(data)) {
+    if (['course:basic', 'rm:menu'].includes(data)) {
       await app0.fetch(webhookRequest(messageUpdate(1, '/start')));
       harness.fetchSpy.calls.length = 0;
     }
@@ -353,7 +353,7 @@ describe('Audit 15 (C2): callback answers happen exactly once across a completio
       await inner(batch);
     };
     const app = buildTestApp(harness);
-    const payload = callbackUpdate(2, 'reminder:30');
+    const payload = callbackUpdate(2, 'rm:menu');
     const failed = await app.fetch(webhookRequest(payload));
     assert.equal(failed.status, 500);
     assert.equal(answerCount(harness), 1);

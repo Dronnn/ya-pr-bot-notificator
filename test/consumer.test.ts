@@ -212,7 +212,7 @@ describe('queue consumer', () => {
   it('skips a reminder whose user changed the offset after enqueue', async () => {
     const harness = createHarness();
     const jobId = await dueReminderJob(harness);
-    await harness.repository.setUserReminderOffset(111, 1440, harness.clock.now());
+    await harness.repository.setUserReminderOffsets(111, [1440], harness.clock.now());
 
     const outcome = await processQueueMessage(makeQueueMessage(jobId), consumerDeps(harness));
 

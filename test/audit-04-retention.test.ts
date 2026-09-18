@@ -80,10 +80,11 @@ function dueCandidates(harness: Harness, now: number): number {
     harness.db,
     `SELECT COUNT(*) AS n FROM occurrences o
      JOIN users u ON u.course = o.course
+     JOIN user_reminder_offsets r ON r.telegram_user_id = u.telegram_user_id
      WHERE u.active = 1 AND o.status = 'confirmed'
        AND o.starts_at_ms > ${now}
        AND o.starts_at_ms <= ${now + EXPANSION_HORIZON_MS}
-       AND o.starts_at_ms - u.reminder_offset_minutes * ${MS_PER_MINUTE} <= ${now}`,
+       AND o.starts_at_ms - r.offset_minutes * ${MS_PER_MINUTE} <= ${now}`,
   );
 }
 
@@ -248,10 +249,11 @@ describe('sent reminder identity through retention', () => {
       harness.db,
       `SELECT COUNT(*) AS n FROM occurrences o
        JOIN users u ON u.course = o.course
+       JOIN user_reminder_offsets r ON r.telegram_user_id = u.telegram_user_id
        WHERE u.active = 1 AND o.status = 'confirmed'
          AND o.starts_at_ms > ${dueNow}
          AND o.starts_at_ms <= ${dueNow + EXPANSION_HORIZON_MS}
-         AND o.starts_at_ms - u.reminder_offset_minutes * ${MS_PER_MINUTE} <= ${dueNow}`,
+         AND o.starts_at_ms - r.offset_minutes * ${MS_PER_MINUTE} <= ${dueNow}`,
     );
     assert.equal(candidates, 1, 'the fixture is genuinely due before the replan');
 

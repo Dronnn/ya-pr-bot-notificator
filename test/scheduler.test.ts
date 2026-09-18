@@ -13,7 +13,13 @@ import {
 } from '../src/util.ts';
 import { countRows } from './helpers/d1-sqlite.ts';
 import { createHarness, schedulerDeps } from './helpers/harness.ts';
-import { occurrence, onboardUser, seedDueReminders, seedSource } from './helpers/seed.ts';
+import {
+  occurrence,
+  onboardUser,
+  seedDueReminders,
+  seedReminderOffsets,
+  seedSource,
+} from './helpers/seed.ts';
 
 describe('scheduler planning and claiming', () => {
   it('plans a due reminder once and claims it for exactly one owner', async () => {
@@ -69,6 +75,7 @@ describe('scheduler planning and claiming', () => {
     await seedSource(harness.repository, 'basic', now);
     await harness.repository.activateUser(111, 111, now);
     onboardUser(harness, 111);
+    seedReminderOffsets(harness, 111, [30]);
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'a#1', startsAtMs: now + 10 * MS_PER_MINUTE, summary: 'Old' })],
       now,
@@ -230,6 +237,7 @@ describe('scheduler planning and claiming', () => {
     await seedSource(harness.repository, 'extended', now);
     await harness.repository.activateUser(111, 111, now);
     onboardUser(harness, 111);
+    seedReminderOffsets(harness, 111, [30]);
     await harness.repository.upsertOccurrences(
       [
         occurrence({

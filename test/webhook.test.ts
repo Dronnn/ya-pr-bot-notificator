@@ -192,7 +192,7 @@ describe('webhook endpoint', () => {
     const jobs = allJobs(harness);
     const reply = jobs.find((job) => job.status === 'pending');
     assert.ok(reply !== undefined);
-    assert.match(String(reply?.payload_json), /reminder:30/);
+    assert.match(String(reply?.payload_json), /rm:t:1440/);
   });
 
   it('acknowledges an unknown callback without creating a job', async () => {
@@ -267,16 +267,21 @@ describe('webhook endpoint', () => {
     assert.match(payload, /Europe\/Moscow \(GMT\+3\)/);
   });
 
-  it('applies a reminder callback and stores the offset', async () => {
+  it('toggles a standard reminder rule from a callback', async () => {
     const harness = createHarness();
     const app = buildTestApp(harness);
     await app.fetch(webhookRequest(messageUpdate(15, '/start')));
-    await app.fetch(webhookRequest(callbackUpdate(16, 'reminder:1440')));
+    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5]);
 
-    const user = await harness.repository.getUser(111);
-    assert.equal(user?.reminderOffsetMinutes, 1440);
+    await app.fetch(webhookRequest(callbackUpdate(16, 'rm:t:5')));
+
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(111),
+      [1440, 60],
+      'the toggled rule is removed',
+    );
     const jobs = allJobs(harness);
-    assert.match(String(jobs[jobs.length - 1]?.payload_json), /за сутки/);
+    assert.match(String(jobs[jobs.length - 1]?.payload_json), /Напоминания/);
   });
 
   it('rejects an oversized request body', async () => {

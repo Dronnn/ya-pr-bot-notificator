@@ -4,10 +4,13 @@
  * The old join started from every occurrence of the course within the full
  * 30-day horizon and only then evaluated `starts_at - offset <= now`, so 1,000
  * users and 60 far-future occurrences produced 60,000 candidate pairs each
- * minute. The planner now bounds `starts_at_ms` to
- * `(now, now + MAX_REMINDER_OFFSET_MINUTES]` by the indexed
- * `(course, starts_at_ms)` range before the user join, and the conflict update
- * is a no-op for unchanged pending rows.
+ * minute. The planner bounds `starts_at_ms` to `(now, now +
+ * MAX_REMINDER_OFFSET_MINUTES]` by the indexed `(course, starts_at_ms)` range
+ * before the user join. Since the largest rule offset (30 days) is exactly the
+ * calendar horizon, that window equals the horizon, and the per-candidate
+ * `send_at_ms <= now` predicate is what removes not-yet-due work; occurrences
+ * beyond the horizon are still never joined. The conflict update is a no-op for
+ * unchanged pending rows.
  *
  * Local `node:sqlite` is a proxy for D1: `EXPLAIN QUERY PLAN`, the rewritten
  * candidate count, the join-fanout count and statement counts exercise the same
@@ -21,15 +24,11 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { Repository } from '../src/data/repository.ts';
 import type { D1DatabaseLike, D1ResultLike, D1StatementLike } from '../src/platform.ts';
-import {
-  EXPANSION_HORIZON_MS,
-  MAX_REMINDER_OFFSET_MINUTES,
-  MS_PER_HOUR,
-  MS_PER_MINUTE,
-} from '../src/util.ts';
+import { MAX_REMINDER_OFFSET_MINUTES } from '../src/domain/notification-policy.ts';
+import { EXPANSION_HORIZON_MS, MS_PER_HOUR, MS_PER_MINUTE } from '../src/util.ts';
 import { type SqliteD1 } from './helpers/d1-sqlite.ts';
 import { createHarness } from './helpers/harness.ts';
-import { occurrence, onboardUser, seedSource } from './helpers/seed.ts';
+import { occurrence, onboardUser, seedReminderOffsets, seedSource } from './helpers/seed.ts';
 
 interface RecordedStatement {
   readonly sql: string;
@@ -153,10 +152,10 @@ function queryPlanDetails(recorder: RecordingD1, planning: RecordedStatement): s
 /**
  * Join-fanout rows the planner's occurrence window would produce: every
  * confirmed occurrence in `(now, windowEndMs]` × every active user of the same
- * course. This is the shape the pre-fix planner evaluated over the full 30-day
- * horizon before applying the per-offset send-time predicate; the fix shrinks
- * the window to `MAX_REMINDER_OFFSET_MINUTES`, so the fanout is what proves the
- * cost bound. Run through the recording wrapper's database.
+ * course. Since the largest rule offset equals the 30-day horizon, the
+ * occurrence window no longer shrinks below it; this shape still proves that
+ * beyond-horizon occurrences are excluded by the indexed range before the join.
+ * Run through the recording wrapper's database.
  */
 function fanoutRows(recorder: RecordingD1, now: number, windowEndMs: number): number {
   const row = recorder.database
@@ -182,8 +181,12 @@ describe('planning proportional to the due window', () => {
     const outside = Array.from({ length: 60 }, (_, index) =>
       occurrence({
         occurrenceKey: `far-${index}`,
-        // 33h .. 28.4d out: all beyond the due window, all inside the horizon.
-        startsAtMs: now + (index + 3) * 11 * MS_PER_HOUR,
+        // Beyond the 30-day horizon. The largest offset equals the horizon, so
+        // nothing past `now + EXPANSION_HORIZON_MS` can ever be a candidate.
+        startsAtMs:
+          now +
+          EXPANSION_HORIZON_MS +
+          (index + 1) * 8 * MS_PER_HOUR,
       }),
     );
     await harness.repository.upsertOccurrences(outside, now);
@@ -192,29 +195,29 @@ describe('planning proportional to the due window', () => {
     const repository = new Repository(recorder);
     const changes = await repository.planDueReminders(now, now + EXPANSION_HORIZON_MS);
 
-    assert.equal(changes, 0, 'no far-future occurrence may become a job');
+    assert.equal(changes, 0, 'no beyond-horizon occurrence may become a job');
     assert.equal(recorder.records.length, 1, 'planning is one set-based statement');
     const planning = recordedPlan(recorder);
     assert.equal(
       candidateRows(recorder, planning),
       0,
-      '1000 users x 60 out-of-window occurrences must evaluate zero candidates',
+      '1000 users x 60 beyond-horizon occurrences must evaluate zero candidates',
     );
 
     const dueWindowEndMs = now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE;
+    assert.equal(
+      dueWindowEndMs,
+      now + EXPANSION_HORIZON_MS,
+      'the due window is exactly the 30-day horizon: the largest offset equals it',
+    );
     assert.ok(
       planning.params.includes(dueWindowEndMs),
       'the recorded statement binds now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE',
     );
     assert.equal(
-      fanoutRows(recorder, now, now + EXPANSION_HORIZON_MS),
-      60_000,
-      'the pre-fix 30-day join shape evaluated 1000 users x 60 occurrences',
-    );
-    assert.equal(
       fanoutRows(recorder, now, dueWindowEndMs),
       0,
-      'the due-window join shape evaluates no far-future occurrence',
+      'the occurrence window evaluates no beyond-horizon occurrence',
     );
 
     // The occurrences search is an index range on (course, starts_at_ms) with
@@ -234,10 +237,11 @@ describe('planning proportional to the due window', () => {
     await seedSource(harness.repository, 'extended', now);
     await harness.repository.activateUser(1, 1, now);
     onboardUser(harness, 1);
+    seedReminderOffsets(harness, 1, [30]);
     await harness.repository.activateUser(2, 2, now);
     onboardUser(harness, 2);
     await harness.repository.setUserCourse(2, 'extended', now);
-    await harness.repository.setUserReminderOffset(2, 1440, now);
+    seedReminderOffsets(harness, 2, [1440]);
 
     await harness.repository.upsertOccurrences(
       [
@@ -294,7 +298,7 @@ describe('planning proportional to the due window', () => {
     await seedSource(harness.repository, 'basic', now);
     await harness.repository.activateUser(1, 1, now);
     onboardUser(harness, 1);
-    await harness.repository.setUserReminderOffset(1, 1440, now);
+    seedReminderOffsets(harness, 1, [MAX_REMINDER_OFFSET_MINUTES]);
     const windowEnd = now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE;
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'edge', startsAtMs: windowEnd })],
@@ -335,16 +339,17 @@ describe('planning proportional to the due window', () => {
     assert.equal(candidateRows(recorder, recordedPlan(recorder)), 0);
   });
 
-  it('plans overdue work after a missed tick without scanning the 30-day horizon', async () => {
+  it('plans overdue work after a missed tick while the send-time predicate bounds candidates', async () => {
     const harness = createHarness();
     const start = harness.clock.now();
     await seedSource(harness.repository, 'basic', start);
     await harness.repository.activateUser(1, 1, start);
     onboardUser(harness, 1);
+    seedReminderOffsets(harness, 1, [30]);
     await harness.repository.upsertOccurrences(
       [
         occurrence({ occurrenceKey: 'overdue', startsAtMs: start + 20 * MS_PER_MINUTE }),
-        occurrence({ occurrenceKey: 'far', startsAtMs: start + 3 * 24 * 60 * MS_PER_MINUTE }),
+        occurrence({ occurrenceKey: 'far', startsAtMs: start + 8 * 24 * 60 * MS_PER_MINUTE }),
       ],
       start,
     );
@@ -366,17 +371,17 @@ describe('planning proportional to the due window', () => {
     assert.equal(
       fanoutRows(recorder, now, now + EXPANSION_HORIZON_MS),
       2,
-      'the old 30-day shape would join both occurrences',
+      'both occurrences are inside the 30-day occurrence window',
     );
     assert.equal(
       fanoutRows(recorder, now, now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE),
-      1,
-      'the due window joins only the occurrence that can be planned',
+      2,
+      'the due window equals the horizon, so the join sees both occurrences',
     );
     assert.equal(
       MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE,
-      24 * 60 * MS_PER_MINUTE,
-      'the due window is exactly the largest supported reminder offset',
+      30 * 24 * 60 * MS_PER_MINUTE,
+      'the due window is exactly the 30-day calendar horizon',
     );
   });
 });

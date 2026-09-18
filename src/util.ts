@@ -26,9 +26,6 @@ export const JOB_ENQUEUE_LEASE_MS = 10 * MS_PER_MINUTE;
 export const JOB_BACKOFF_BASE_MS = 5_000;
 const JOB_BACKOFF_CAP_MS = 15 * MS_PER_MINUTE;
 
-/** Largest supported reminder offset; planning only looks this far ahead. */
-export const MAX_REMINDER_OFFSET_MINUTES = 1440;
-
 // Source sync leases and freshness.
 export const SOURCE_LEASE_MS = 5 * MS_PER_MINUTE;
 /**

@@ -53,7 +53,7 @@ describe('per-invocation statement budget', () => {
     const now = harness.clock.now();
     harness.repository.beginInvocation(3);
     await harness.repository.activateUser(1, 1, now);
-    assert.equal(harness.repository.statementsUsed(), 2);
+    assert.equal(harness.repository.statementsUsed(), 3, 'upsert, read-back, default rules');
     await assert.rejects(harness.repository.activateUser(2, 2, now), StatementBudgetError);
   });
 

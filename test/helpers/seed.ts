@@ -77,8 +77,10 @@ export interface DueReminderSeedOptions {
   occurrenceKey?: string;
   /** Occurrence start; defaults to ten minutes after the current clock. */
   startsAtMs?: number;
-  /** Stored reminder offset; omitted keeps the activation default of 30 minutes. */
-  reminderOffsetMinutes?: 30 | 1440;
+  /** Single stored reminder rule; ignored when `reminderOffsets` is given. */
+  reminderOffsetMinutes?: number;
+  /** Stored reminder rule set; defaults to the legacy single 30-minute rule. */
+  reminderOffsets?: readonly number[];
   /** Stored timezone; omitted completes onboarding with Europe/Moscow. */
   timeZone?: string;
 }
@@ -103,6 +105,28 @@ export function onboardUser(
 }
 
 /**
+ * Replaces a fixture user's reminder rule set directly, bypassing the guarded
+ * mutation and its revision bump so fixtures keep a stable user revision (the
+ * same rationale as `onboardUser`). An empty set leaves the user with zero
+ * rules.
+ */
+export function seedReminderOffsets(
+  harness: Harness,
+  userId: number,
+  offsets: readonly number[],
+): void {
+  const db = harness.db.database;
+  db.prepare('DELETE FROM user_reminder_offsets WHERE telegram_user_id = ?').run(userId);
+  const insert = db.prepare(
+    'INSERT INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms) VALUES (?, ?, ?)',
+  );
+  const now = harness.clock.now();
+  for (const offset of offsets) {
+    insert.run(userId, offset, now);
+  }
+}
+
+/**
  * Seeds the basic source, activates `userIds` and plans one due occurrence. A
  * numeric `userIds` is read as a recipient count and activates users 1..count.
  */
@@ -117,14 +141,11 @@ export async function seedDueReminders(
       ? Array.from({ length: userIds }, (_, index) => index + 1)
       : userIds;
   await seedSource(harness.repository, 'basic', now);
+  const offsets = options.reminderOffsets ?? [options.reminderOffsetMinutes ?? 30];
   for (const userId of ids) {
     await harness.repository.activateUser(userId, userId, now);
     onboardUser(harness, userId, options.timeZone ?? TEST_USER_TIME_ZONE);
-  }
-  if (options.reminderOffsetMinutes !== undefined && options.reminderOffsetMinutes !== 30) {
-    for (const userId of ids) {
-      await harness.repository.setUserReminderOffset(userId, options.reminderOffsetMinutes, now);
-    }
+    seedReminderOffsets(harness, userId, offsets);
   }
   await harness.repository.upsertOccurrences(
     [

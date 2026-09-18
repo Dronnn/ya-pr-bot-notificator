@@ -320,6 +320,7 @@ describe('send attempts count started Telegram calls', () => {
         '0005_pacer_and_cleanup_indexes.sql',
         '0006_callback_answers.sql',
         '0007_user_time_zone.sql',
+        '0008_user_reminder_rules.sql',
       ],
       'every migration is applied in filename order by default',
     );

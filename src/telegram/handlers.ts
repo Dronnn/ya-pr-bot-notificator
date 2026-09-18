@@ -60,7 +60,11 @@
  */
 
 import type { Repository, UserRecord } from '../data/repository.ts';
-import type { Course, ReminderOffsetMinutes } from '../domain/notification-policy.ts';
+import {
+  isValidReminderOffset,
+  type Course,
+  type ReminderOffsetMinutes,
+} from '../domain/notification-policy.ts';
 import type { OutboundJobMessage, QueueProducerLike } from '../platform.ts';
 import { normalizeTimeZone, type Clock, type Logger } from '../util.ts';
 import type { ReplyMarkup, TelegramClient } from './adapter.ts';
@@ -74,13 +78,18 @@ import {
   buildCoursePromptText,
   buildEventsText,
   buildReminderPromptText,
+  buildRemindersKeyboard,
+  buildRemindersText,
   buildSettingsText,
   buildTimeZoneText,
   EVENTS_GUIDANCE_TEXT,
   HELP_TEXT,
   INACTIVE_GUIDANCE_TEXT,
   MENU_KEYBOARD,
-  REMINDER_KEYBOARD,
+  REMINDERS_ADD_HINT_TEXT,
+  REMINDERS_EDIT_HINT_TEXT,
+  REMINDERS_INVALID_TEXT,
+  REMINDERS_LIMIT_TEXT,
   resolveMenuCommand,
   SETTINGS_KEYBOARD,
   START_TEXT,
@@ -110,18 +119,57 @@ const UNKNOWN_ACTION_TEXT = 'Неизвестное действие';
 
 type CallbackIntent =
   | { kind: 'set-course'; course: Course }
-  | { kind: 'set-reminder-offset'; offset: ReminderOffsetMinutes }
   | { kind: 'set-time-zone'; timeZone: string };
 
-/** The handled callback buttons, keyed by their exact `callback_data`. */
+/** The handled fixed callback buttons, keyed by their exact `callback_data`. */
 const CALLBACK_INTENTS: Readonly<Record<string, CallbackIntent>> = {
   'course:basic': { kind: 'set-course', course: 'basic' },
   'course:extended': { kind: 'set-course', course: 'extended' },
-  'reminder:30': { kind: 'set-reminder-offset', offset: 30 },
-  'reminder:1440': { kind: 'set-reminder-offset', offset: 1440 },
   'tz:Europe/Moscow': { kind: 'set-time-zone', timeZone: 'Europe/Moscow' },
   'tz:Asia/Yerevan': { kind: 'set-time-zone', timeZone: 'Asia/Yerevan' },
 };
+
+/** Reminder-rule callback payloads; offsets are range-checked at parse time. */
+type ReminderCallback =
+  | { kind: 'menu' }
+  | { kind: 'add' }
+  | { kind: 'clear' }
+  | { kind: 'toggle'; offset: ReminderOffsetMinutes }
+  | { kind: 'remove'; offset: ReminderOffsetMinutes }
+  | { kind: 'edit'; offset: ReminderOffsetMinutes };
+
+const REMINDER_CALLBACK_PATTERN = /^rm:(t|del|edit):(\d{1,7})$/;
+
+/** Parses a `rm:` callback, or null when it is not a reminder-rule payload. */
+function parseReminderCallback(data: string): ReminderCallback | null {
+  if (data === 'rm:menu') {
+    return { kind: 'menu' };
+  }
+  if (data === 'rm:add') {
+    return { kind: 'add' };
+  }
+  if (data === 'rm:clear') {
+    return { kind: 'clear' };
+  }
+  const match = REMINDER_CALLBACK_PATTERN.exec(data);
+  if (match === null) {
+    return null;
+  }
+  const offset = Number(match[2]);
+  if (!isValidReminderOffset(offset)) {
+    return null;
+  }
+  switch (match[1]) {
+    case 't':
+      return { kind: 'toggle', offset };
+    case 'del':
+      return { kind: 'remove', offset };
+    case 'edit':
+      return { kind: 'edit', offset };
+    default:
+      return null;
+  }
+}
 
 export async function handleUpdate(update: ParsedUpdate, deps: HandlerDeps): Promise<void> {
   // Finding 3: a retry after a lost completion must not replay effects. When
@@ -160,12 +208,16 @@ function usableTimeZone(user: Pick<UserRecord, 'timeZone'>): string | null {
 
 /**
  * Settings view shared by `/start`, `/settings` and successful timezone
- * changes: the stored course, offset and timezone plus the timezone choices on
- * the keyboard. An unfinished choice repeats how to complete it; an existing
- * one explains how to change it and continues to the course prompt.
+ * changes: the stored course, the enabled reminder rules and the timezone plus
+ * the timezone choices on the keyboard. An unfinished choice repeats how to
+ * complete it; an existing one explains how to change it and continues to the
+ * course prompt.
  */
-function settingsReplyText(user: Pick<UserRecord, 'course' | 'reminderOffsetMinutes' | 'timeZone'>): string {
-  const header = buildSettingsText(user.course, user.reminderOffsetMinutes, user.timeZone);
+function settingsReplyText(
+  user: Pick<UserRecord, 'course' | 'timeZone'>,
+  offsets: readonly ReminderOffsetMinutes[],
+): string {
+  const header = buildSettingsText(user.course, offsets, user.timeZone);
   if (user.timeZone === null) {
     return `${header}\n${TIMEZONE_PROMPT_TEXT}`;
   }
@@ -208,11 +260,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
         );
         return;
       }
+      const offsets = await deps.repository.listReminderOffsets(update.userId);
       await enqueueReply(
         deps,
         update,
         {
-          text: `${START_TEXT}\n${buildSettingsText(user.course, user.reminderOffsetMinutes, timeZone)}`,
+          text: `${START_TEXT}\n${buildSettingsText(user.course, offsets, timeZone)}`,
           replyMarkup: SETTINGS_KEYBOARD,
         },
         user.revision,
@@ -237,15 +290,39 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
         );
         return;
       }
+      const offsets = await deps.repository.listReminderOffsets(update.userId);
       await enqueueReply(
         deps,
         update,
         {
-          text: settingsReplyText({ ...user, timeZone: usableTimeZone(user) }),
+          text: settingsReplyText({ ...user, timeZone: usableTimeZone(user) }, offsets),
           replyMarkup: SETTINGS_KEYBOARD,
         },
         user.revision,
       );
+      return;
+    }
+    case '/reminders': {
+      // Same ordering guard as every other command: a stale update may neither
+      // mutate the rule set nor queue its superseded menu.
+      if (!(await deps.repository.claimCommandUpdate(update.userId, update.chatId, update.updateId, deps.now()))) {
+        return;
+      }
+      const user = await deps.repository.getUser(update.userId);
+      if (!(await isCurrentCommand(deps, update))) {
+        return;
+      }
+      if (user === null || !user.active) {
+        // /stop stays authoritative: reminder settings never reactivate.
+        await enqueueReply(
+          deps,
+          update,
+          { text: INACTIVE_GUIDANCE_TEXT, replyMarkup: MENU_KEYBOARD },
+          user?.revision ?? null,
+        );
+        return;
+      }
+      await applyReminderCommand(deps, update, user, argument);
       return;
     }
     case '/timezone': {
@@ -294,11 +371,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
         return;
       }
       const updated = await deps.repository.getUser(update.userId);
+      const offsets = await deps.repository.listReminderOffsets(update.userId);
       await enqueueReply(
         deps,
         update,
         {
-          text: settingsReplyText(updated ?? { ...user, timeZone }),
+          text: settingsReplyText(updated ?? { ...user, timeZone }, offsets),
           replyMarkup: SETTINGS_KEYBOARD,
         },
         updated?.revision ?? user.revision,
@@ -420,6 +498,12 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
     return;
   }
 
+  const reminderIntent = parseReminderCallback(update.data);
+  if (reminderIntent !== null) {
+    await handleReminderCallback(deps, update, reminderIntent);
+    return;
+  }
+
   const intent = CALLBACK_INTENTS[update.data];
 
   if (intent?.kind === 'set-course') {
@@ -434,31 +518,7 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
     // acknowledgement exactly once (the `callback_answers` dedup guarantees it).
     const current = await isCurrentCommand(deps, update);
     const updated = current ? await deps.repository.getUser(update.userId) : null;
-    if (await deps.repository.claimCallbackAnswer(update.callbackQueryId, update.updateId, deps.now())) {
-      await deps.telegram.answerCallbackQuery(update.callbackQueryId);
-    }
-    if (!current) {
-      return;
-    }
-    await enqueueReply(
-      deps,
-      update,
-      { text: buildReminderPromptText(course), replyMarkup: REMINDER_KEYBOARD },
-      updated?.revision ?? null,
-    );
-    return;
-  }
-
-  if (intent?.kind === 'set-reminder-offset') {
-    const { offset } = intent;
-    if (!(await deps.repository.claimCommandUpdate(update.userId, update.chatId, update.updateId, deps.now()))) {
-      return;
-    }
-    await deps.repository.setUserReminderOffset(update.userId, offset, deps.now(), update.updateId);
-    await deps.repository.cancelPendingJobsForUser(update.userId, deps.now(), update.updateId);
-    // FIX-ORDER: guarded exactly like the course callback above.
-    const current = await isCurrentCommand(deps, update);
-    const updated = current ? await deps.repository.getUser(update.userId) : null;
+    const offsets = current ? await deps.repository.listReminderOffsets(update.userId) : [];
     if (await deps.repository.claimCallbackAnswer(update.callbackQueryId, update.updateId, deps.now())) {
       await deps.telegram.answerCallbackQuery(update.callbackQueryId);
     }
@@ -469,11 +529,8 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
       deps,
       update,
       {
-        text: buildSettingsText(
-          user.course,
-          offset,
-          updated?.timeZone ?? user.timeZone,
-        ),
+        text: buildReminderPromptText(course, offsets),
+        replyMarkup: buildRemindersKeyboard(offsets),
       },
       updated?.revision ?? null,
     );
@@ -498,6 +555,7 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
     // FIX-ORDER: guarded exactly like the course callback above.
     const current = await isCurrentCommand(deps, update);
     const updated = current ? await deps.repository.getUser(update.userId) : null;
+    const offsets = current ? await deps.repository.listReminderOffsets(update.userId) : [];
     if (await deps.repository.claimCallbackAnswer(update.callbackQueryId, update.updateId, deps.now())) {
       await deps.telegram.answerCallbackQuery(update.callbackQueryId);
     }
@@ -508,7 +566,7 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
       deps,
       update,
       {
-        text: settingsReplyText(updated ?? { ...user, timeZone }),
+        text: settingsReplyText(updated ?? { ...user, timeZone }, offsets),
         replyMarkup: SETTINGS_KEYBOARD,
       },
       updated?.revision ?? null,
@@ -520,6 +578,195 @@ async function handleCallback(deps: HandlerDeps, update: PrivateCallbackUpdate):
     return;
   }
   await deps.telegram.answerCallbackQuery(update.callbackQueryId, UNKNOWN_ACTION_TEXT);
+}
+
+/** Renders the reminder settings view for a mutating callback or command. */
+function reminderMenuText(
+  offsets: readonly ReminderOffsetMinutes[],
+  prefix?: string,
+): string {
+  const body = buildRemindersText(offsets);
+  return prefix === undefined ? body : `${prefix}\n${body}`;
+}
+
+/**
+ * Reminder-rule command (`/reminders ...`): validates and applies `add`, `del`,
+ * `edit` and `clear`, cancels the user's pending reminder jobs so the next tick
+ * replans from the new set, and replies with the resulting menu. Invalid input
+ * replies guidance without touching any state.
+ */
+async function applyReminderCommand(
+  deps: HandlerDeps,
+  update: PrivateMessageUpdate,
+  user: UserRecord,
+  argument: string,
+): Promise<void> {
+  const tokens = argument.length === 0 ? [] : argument.split(/\s+/);
+  const sub = (tokens[0] ?? '').toLowerCase();
+  const offsets = await deps.repository.listReminderOffsets(update.userId);
+  let invalid = false;
+  let limitReached = false;
+  let mutated = false;
+
+  const parseOffset = (token: string | undefined): number | null => {
+    if (token === undefined || !/^\d{1,7}$/.test(token)) {
+      return null;
+    }
+    const value = Number(token);
+    return isValidReminderOffset(value) ? value : null;
+  };
+
+  if (sub === 'add') {
+    const offset = parseOffset(tokens[1]);
+    if (offset === null || tokens.length !== 2) {
+      invalid = true;
+    } else if (!offsets.includes(offset)) {
+      mutated = await deps.repository.addReminderOffset(
+        update.userId,
+        offset,
+        deps.now(),
+        update.updateId,
+      );
+      limitReached = !mutated;
+    }
+  } else if (sub === 'del') {
+    const offset = parseOffset(tokens[1]);
+    if (offset === null || tokens.length !== 2) {
+      invalid = true;
+    } else {
+      mutated = await deps.repository.removeReminderOffset(
+        update.userId,
+        offset,
+        deps.now(),
+        update.updateId,
+      );
+    }
+  } else if (sub === 'edit') {
+    const from = parseOffset(tokens[1]);
+    const to = parseOffset(tokens[2]);
+    if (from === null || to === null || tokens.length !== 3) {
+      invalid = true;
+    } else if (from !== to && offsets.includes(from) && !offsets.includes(to)) {
+      // Atomic rename: the repository never drops the source rule when the
+      // target cannot be written, so a refused edit cannot lose the old rule.
+      mutated = await deps.repository.editReminderOffset(
+        update.userId,
+        from,
+        to,
+        deps.now(),
+        update.updateId,
+      );
+      limitReached = !mutated;
+    }
+  } else if (sub === 'clear') {
+    if (tokens.length !== 1) {
+      invalid = true;
+    } else {
+      mutated = await deps.repository.setUserReminderOffsets(
+        update.userId,
+        [],
+        deps.now(),
+        update.updateId,
+      );
+    }
+  } else {
+    invalid = true;
+  }
+
+  if (mutated) {
+    await deps.repository.cancelPendingJobsForUser(update.userId, deps.now(), update.updateId);
+  }
+  if (!(await isCurrentCommand(deps, update))) {
+    return;
+  }
+  const finalOffsets = await deps.repository.listReminderOffsets(update.userId);
+  const refreshed = mutated ? await deps.repository.getUser(update.userId) : user;
+  const prefix = invalid
+    ? REMINDERS_INVALID_TEXT
+    : limitReached
+      ? REMINDERS_LIMIT_TEXT
+      : undefined;
+  await enqueueReply(
+    deps,
+    update,
+    {
+      text: reminderMenuText(finalOffsets, prefix),
+      replyMarkup: buildRemindersKeyboard(finalOffsets),
+    },
+    refreshed?.revision ?? user.revision,
+  );
+}
+
+/**
+ * Reminder-rule inline callback. Toggle/remove/clear mutate the set and cancel
+ * the user's pending jobs; menu/add/edit are show-only guidance. The
+ * ordering guard and the callback-answer dedup match the course/timezone
+ * callbacks, so a stale callback never mutates and answers at most once.
+ */
+async function handleReminderCallback(
+  deps: HandlerDeps,
+  update: PrivateCallbackUpdate,
+  intent: ReminderCallback,
+): Promise<void> {
+  if (!(await deps.repository.claimCommandUpdate(update.userId, update.chatId, update.updateId, deps.now()))) {
+    return;
+  }
+  const offsets = await deps.repository.listReminderOffsets(update.userId);
+  let mutated = false;
+  switch (intent.kind) {
+    case 'toggle':
+      mutated = offsets.includes(intent.offset)
+        ? await deps.repository.removeReminderOffset(update.userId, intent.offset, deps.now(), update.updateId)
+        : await deps.repository.addReminderOffset(update.userId, intent.offset, deps.now(), update.updateId);
+      break;
+    case 'remove':
+      mutated = await deps.repository.removeReminderOffset(
+        update.userId,
+        intent.offset,
+        deps.now(),
+        update.updateId,
+      );
+      break;
+    case 'clear':
+      mutated = await deps.repository.setUserReminderOffsets(
+        update.userId,
+        [],
+        deps.now(),
+        update.updateId,
+      );
+      break;
+    case 'menu':
+    case 'add':
+    case 'edit':
+      break;
+  }
+  if (mutated) {
+    await deps.repository.cancelPendingJobsForUser(update.userId, deps.now(), update.updateId);
+  }
+  const current = await isCurrentCommand(deps, update);
+  const updated = current ? await deps.repository.getUser(update.userId) : null;
+  const finalOffsets = current ? await deps.repository.listReminderOffsets(update.userId) : [];
+  if (await deps.repository.claimCallbackAnswer(update.callbackQueryId, update.updateId, deps.now())) {
+    await deps.telegram.answerCallbackQuery(update.callbackQueryId);
+  }
+  if (!current) {
+    return;
+  }
+  const prefix =
+    intent.kind === 'add'
+      ? REMINDERS_ADD_HINT_TEXT
+      : intent.kind === 'edit'
+        ? REMINDERS_EDIT_HINT_TEXT
+        : undefined;
+  await enqueueReply(
+    deps,
+    update,
+    {
+      text: reminderMenuText(finalOffsets, prefix),
+      replyMarkup: buildRemindersKeyboard(finalOffsets),
+    },
+    updated?.revision ?? null,
+  );
 }
 
 /**

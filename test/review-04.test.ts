@@ -49,6 +49,7 @@ import {
   onboardUser,
   parsedEvent,
   seedDueJobs,
+  seedReminderOffsets,
   seedSource,
   TEST_SOURCE,
 } from './helpers/seed.ts';
@@ -252,6 +253,7 @@ describe('atomic snapshot publication', () => {
     await seedSource(harness.repository, 'basic', now);
     await harness.repository.activateUser(7, 7, now);
     onboardUser(harness, 7);
+    seedReminderOffsets(harness, 7, [30]);
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'due', startsAtMs: now + MS_PER_MINUTE })],
       now,

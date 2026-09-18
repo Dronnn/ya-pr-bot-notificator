@@ -644,11 +644,7 @@ async function screenReminder(
       outcome: await finishTerminal(deps, context, owner, 'cancelled', 'no-time-zone', now),
     };
   }
-  if (
-    context.reminderOffsetMinutes !== null &&
-    context.userReminderOffsetMinutes !== null &&
-    context.reminderOffsetMinutes !== context.userReminderOffsetMinutes
-  ) {
+  if (context.reminderOffsetMinutes !== null && !context.userHasReminderOffset) {
     return {
       kind: 'finished',
       outcome: await finishTerminal(deps, context, owner, 'cancelled', 'skip_offset-mismatch', now),

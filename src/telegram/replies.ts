@@ -5,7 +5,11 @@
  */
 
 import type { OccurrenceView } from '../data/repository.ts';
-import type { Course, ReminderOffsetMinutes } from '../domain/notification-policy.ts';
+import {
+  DEFAULT_REMINDER_OFFSETS,
+  type Course,
+  type ReminderOffsetMinutes,
+} from '../domain/notification-policy.ts';
 import { formatUserTime } from '../util.ts';
 import type { InlineKeyboardMarkup, ReplyKeyboardMarkup } from './adapter.ts';
 
@@ -27,19 +31,71 @@ export const COURSE_KEYBOARD: InlineKeyboardMarkup = {
   ],
 };
 
-export const REMINDER_KEYBOARD: InlineKeyboardMarkup = {
-  inline_keyboard: [
-    [{ text: 'За 30 минут', callback_data: 'reminder:30' }],
-    [{ text: 'За сутки', callback_data: 'reminder:1440' }],
-  ],
-};
+/** Human label of a lead time, for buttons and the settings summary. */
+export function offsetLabel(offset: ReminderOffsetMinutes): string {
+  if (offset === 1440) {
+    return 'за сутки';
+  }
+  if (offset === 60) {
+    return 'за 1 час';
+  }
+  if (offset === 5) {
+    return 'за 5 минут';
+  }
+  if (offset % 1440 === 0) {
+    return `за ${offset / 1440} дн.`;
+  }
+  if (offset % 60 === 0) {
+    return `за ${offset / 60} ч.`;
+  }
+  return `за ${offset} мин.`;
+}
 
-/** Settings view: timezone choices next to the existing course/reminder controls. */
+/** Short one-line summary of the enabled rule set. */
+export function formatReminderOffsets(offsets: readonly ReminderOffsetMinutes[]): string {
+  if (offsets.length === 0) {
+    return 'выключены';
+  }
+  return offsets.map((offset) => `${offsetLabel(offset)} (${offset} мин.)`).join(', ');
+}
+
+/**
+ * Reminder control keyboard. The three standard rules are toggle buttons
+ * (enabled/disabled in place); custom rules get an edit and a delete button.
+ * Callback payloads carry the offset directly and are parsed back by the
+ * handler, so only one row is needed per rule.
+ */
+export function buildRemindersKeyboard(
+  offsets: readonly ReminderOffsetMinutes[],
+): InlineKeyboardMarkup {
+  const enabled = new Set(offsets);
+  const rows: { text: string; callback_data: string }[][] = [];
+  for (const offset of DEFAULT_REMINDER_OFFSETS) {
+    const state = enabled.has(offset) ? 'вкл' : 'выкл';
+    rows.push([{ text: `${offsetLabel(offset)} [${state}]`, callback_data: `rm:t:${offset}` }]);
+  }
+  for (const offset of offsets) {
+    if (DEFAULT_REMINDER_OFFSETS.includes(offset)) {
+      continue;
+    }
+    rows.push([
+      { text: `Изменить: ${offsetLabel(offset)}`, callback_data: `rm:edit:${offset}` },
+      { text: `Удалить: ${offsetLabel(offset)}`, callback_data: `rm:del:${offset}` },
+    ]);
+  }
+  rows.push([{ text: 'Добавить время', callback_data: 'rm:add' }]);
+  if (offsets.length > 0) {
+    rows.push([{ text: 'Убрать все', callback_data: 'rm:clear' }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+/** Settings view: timezone choices, course controls and the reminder entry point. */
 export const SETTINGS_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
     ...TIMEZONE_KEYBOARD.inline_keyboard,
     ...COURSE_KEYBOARD.inline_keyboard,
-    ...REMINDER_KEYBOARD.inline_keyboard,
+    [{ text: 'Напоминания', callback_data: 'rm:menu' }],
   ],
 };
 
@@ -50,8 +106,9 @@ export const SETTINGS_KEYBOARD: InlineKeyboardMarkup = {
  */
 export const MENU_KEYBOARD: ReplyKeyboardMarkup = {
   keyboard: [
-    [{ text: 'Настройки' }, { text: 'Часовой пояс' }],
-    [{ text: 'Ближайшие занятия' }, { text: 'Помощь' }],
+    [{ text: 'Настройки' }, { text: 'Напоминания' }],
+    [{ text: 'Часовой пояс' }, { text: 'Ближайшие занятия' }],
+    [{ text: 'Помощь' }],
   ],
   resize_keyboard: true,
   is_persistent: true,
@@ -63,6 +120,7 @@ export const MENU_KEYBOARD: ReplyKeyboardMarkup = {
  */
 export const MENU_COMMANDS: ReadonlyMap<string, string> = new Map([
   ['настройки', '/settings'],
+  ['напоминания', '/reminders'],
   ['часовой пояс', '/timezone'],
   ['ближайшие занятия', '/events'],
   ['помощь', '/help'],
@@ -80,7 +138,8 @@ export function resolveMenuCommand(text: string): string {
  */
 export const BOT_COMMANDS: readonly { command: string; description: string }[] = [
   { command: 'start', description: 'Начать и выбрать курс' },
-  { command: 'settings', description: 'Курс, напоминание, часовой пояс' },
+  { command: 'settings', description: 'Курс, напоминания, часовой пояс' },
+  { command: 'reminders', description: 'Настроить время напоминаний' },
   { command: 'timezone', description: 'Выбрать или изменить часовой пояс' },
   { command: 'events', description: 'Ближайшие занятия' },
   { command: 'stop', description: 'Отключить напоминания' },
@@ -99,7 +158,8 @@ export const TIMEZONE_INVALID_TEXT =
 
 export const HELP_TEXT = `Доступные команды:
 /start - начать и выбрать курс
-/settings - изменить курс, время напоминания и часовой пояс
+/settings - изменить курс, напоминания и часовой пояс
+/reminders - настроить время напоминаний (add/del/edit/clear)
 /timezone - выбрать или изменить часовой пояс, например /timezone Asia/Yerevan
 /events - ближайшие занятия
 /stop - отключить напоминания
@@ -133,15 +193,6 @@ export function courseLabel(course: Course): string {
   }
 }
 
-export function offsetLabel(offset: ReminderOffsetMinutes): string {
-  switch (offset) {
-    case 30:
-      return 'за 30 минут';
-    case 1440:
-      return 'за сутки';
-  }
-}
-
 /** Instruction line shown wherever an existing choice can be changed. */
 export const TIMEZONE_CHANGE_HINT =
   'Изменить часовой пояс: /timezone Region/City (например, /timezone Europe/Berlin)';
@@ -159,20 +210,59 @@ export function buildTimeZoneText(timeZone: string | null): string {
 
 export function buildSettingsText(
   course: Course,
-  offset: ReminderOffsetMinutes,
+  offsets: readonly ReminderOffsetMinutes[],
   timeZone: string | null,
 ): string {
   const zone = timeZone ?? 'не выбран';
-  return `Настройки:\nКурс: ${courseLabel(course)}\nНапоминание: ${offsetLabel(offset)}\nЧасовой пояс: ${zone}`;
+  return `Настройки:\nКурс: ${courseLabel(course)}\nНапоминания: ${formatReminderOffsets(offsets)}\nЧасовой пояс: ${zone}`;
 }
 
 export function buildCoursePromptText(): string {
   return 'Выберите курс:';
 }
 
-export function buildReminderPromptText(course: Course): string {
-  return `Курс: ${courseLabel(course)}\nКогда напомнить о занятии?`;
+/**
+ * Reminder settings view: the enabled rules plus the exact command forms for
+ * adding, editing, deleting and clearing rules. The buttons below carry the
+ * per-rule actions.
+ */
+export function buildRemindersText(offsets: readonly ReminderOffsetMinutes[]): string {
+  const lines = [
+    `Напоминания (правил: ${offsets.length}):`,
+  ];
+  if (offsets.length === 0) {
+    lines.push('Сейчас напоминания выключены.');
+  } else {
+    for (const offset of offsets) {
+      lines.push(`- ${offsetLabel(offset)} (${offset} мин.)`);
+    }
+  }
+  lines.push(
+    'Добавить: /reminders add 90',
+    'Изменить: /reminders edit 60 90',
+    'Удалить: /reminders del 60',
+    'Убрать все: /reminders clear',
+  );
+  return lines.join('\n');
 }
+
+export function buildReminderPromptText(
+  course: Course,
+  offsets: readonly ReminderOffsetMinutes[],
+): string {
+  return `Курс: ${courseLabel(course)}\n${buildRemindersText(offsets)}`;
+}
+
+export const REMINDERS_INVALID_TEXT =
+  'Не удалось распознать время. Укажите целое число минут от 1 до 43200, например /reminders add 90.';
+
+export const REMINDERS_ADD_HINT_TEXT =
+  'Отправьте /reminders add <минуты>, чтобы добавить правило, например /reminders add 90.';
+
+export const REMINDERS_EDIT_HINT_TEXT =
+  'Отправьте /reminders edit <старое> <новое>, чтобы изменить правило, например /reminders edit 60 90.';
+
+export const REMINDERS_LIMIT_TEXT = 'Достигнут максимум числа правил напоминаний.';
 
 export function buildReminderText(
   summary: string,
