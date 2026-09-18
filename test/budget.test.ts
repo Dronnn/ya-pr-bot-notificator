@@ -51,9 +51,9 @@ describe('per-invocation statement budget', () => {
   it('throws once an invocation exceeds its limit', async () => {
     const harness = createHarness();
     const now = harness.clock.now();
-    harness.repository.beginInvocation(3);
+    harness.repository.beginInvocation(2);
     await harness.repository.activateUser(1, 1, now);
-    assert.equal(harness.repository.statementsUsed(), 3, 'upsert, read-back, default rules');
+    assert.equal(harness.repository.statementsUsed(), 2, 'user insert with atomic defaults, read-back');
     await assert.rejects(harness.repository.activateUser(2, 2, now), StatementBudgetError);
   });
 

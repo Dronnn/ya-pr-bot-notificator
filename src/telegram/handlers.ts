@@ -61,6 +61,7 @@
 
 import type { Repository, UserRecord } from '../data/repository.ts';
 import {
+  MAX_REMINDER_RULES_PER_USER,
   isValidReminderOffset,
   type Course,
   type ReminderOffsetMinutes,
@@ -627,7 +628,7 @@ async function applyReminderCommand(
         deps.now(),
         update.updateId,
       );
-      limitReached = !mutated;
+      limitReached = !mutated && offsets.length >= MAX_REMINDER_RULES_PER_USER;
     }
   } else if (sub === 'del') {
     const offset = parseOffset(tokens[1]);

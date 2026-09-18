@@ -275,6 +275,21 @@ describe('reminder rule sets', () => {
       [MAX_REMINDER_OFFSET_MINUTES],
     );
 
+    const bulkOffsets = Array.from(
+      { length: MAX_REMINDER_RULES_PER_USER },
+      (_, index) => index + 1,
+    );
+    assert.equal(
+      await harness.repository.setUserReminderOffsets(USER_ID, bulkOffsets, now),
+      true,
+      'the full rule set is replaced atomically in a bounded batch',
+    );
+    assert.equal(
+      (await harness.repository.listReminderOffsets(USER_ID)).length,
+      MAX_REMINDER_RULES_PER_USER,
+      'the bounded bulk replacement stores all rules',
+    );
+
     await harness.repository.setUserReminderOffsets(USER_ID, [], now);
     for (let offset = 1; offset <= MAX_REMINDER_RULES_PER_USER; offset += 1) {
       assert.equal(
@@ -307,12 +322,12 @@ describe('reminder write statement budget', () => {
     const now = harness.clock.now();
     const repository = harness.repository;
 
-    repository.beginInvocation(3);
+    repository.beginInvocation(2);
     await repository.activateUser(USER_ID, USER_ID, now);
     assert.equal(
       repository.statementsUsed(),
-      3,
-      'fresh /start: user upsert, read-back and one bulk default-rule insert',
+      2,
+      'fresh /start: user insert (which atomically seeds defaults) and read-back',
     );
 
     repository.beginInvocation(2);
@@ -327,9 +342,9 @@ describe('reminder write statement budget', () => {
     assert.equal(await repository.removeReminderOffset(USER_ID, 45, now), true);
     assert.equal(repository.statementsUsed(), 2, 'delete: revision bump + delete');
 
-    repository.beginInvocation(2);
+    repository.beginInvocation(3);
     assert.equal(await repository.setUserReminderOffsets(USER_ID, [], now), true);
-    assert.equal(repository.statementsUsed(), 2, 'clear: revision bump + delete all');
+    assert.equal(repository.statementsUsed(), 3, 'clear: revision bump, delete all and empty insert');
 
     repository.beginInvocation(1);
     assert.equal(

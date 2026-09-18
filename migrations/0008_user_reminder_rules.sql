@@ -61,6 +61,19 @@ CREATE TABLE user_reminder_offsets (
 
 -- The primary key already covers lookups by user (its leading column); no
 -- secondary index is needed.
+-- New users receive the standard set in the same SQLite transaction as the
+-- users INSERT. This avoids a half-created user if the follow-up D1 statement
+-- is interrupted.
+CREATE TRIGGER users_insert_default_reminder_offsets
+AFTER INSERT ON users
+BEGIN
+  INSERT INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
+  VALUES
+    (NEW.telegram_user_id, 1440, NEW.created_at_ms),
+    (NEW.telegram_user_id, 60, NEW.created_at_ms),
+    (NEW.telegram_user_id, 5, NEW.created_at_ms);
+END;
+
 INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
   SELECT u.telegram_user_id, d.offset_minutes, 0
   FROM users u

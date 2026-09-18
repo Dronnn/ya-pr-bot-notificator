@@ -12,7 +12,6 @@
 import type { D1DatabaseLike, D1ResultLike, D1StatementLike } from '../platform.ts';
 import type { OccurrenceStatus } from '../domain/calendar.ts';
 import {
-  DEFAULT_REMINDER_OFFSETS,
   MAX_REMINDER_RULES_PER_USER,
   MAX_REMINDER_OFFSET_MINUTES,
   isValidReminderOffset,
@@ -721,35 +720,7 @@ export class Repository {
       }
       throw new Error('activateUser failed to persist the user');
     }
-    if (inserted > 0) {
-      await this.#ensureDefaultReminderOffsets(telegramUserId, now, commandUpdateId);
-    }
     return user;
-  }
-
-  /**
-   * Seeds the standard reminder rules for a freshly inserted user. Called only
-   * from the insert branch of `activateUser`, so reactivating an existing user
-   * (including one who cleared every rule) never restores defaults. The
-   * insert-or-ignore keeps a retried insert idempotent. Guarded by
-   * `COMMAND_CURRENT` when a command update id is given.
-   */
-  async #ensureDefaultReminderOffsets(
-    telegramUserId: number,
-    now: number,
-    commandUpdateId?: number,
-  ): Promise<void> {
-    const tuples = DEFAULT_REMINDER_OFFSETS.map(() => '(?, ?, ?)').join(', ');
-    const values: unknown[] = [];
-    for (const offset of DEFAULT_REMINDER_OFFSETS) {
-      values.push(telegramUserId, offset, now);
-    }
-    values.push(...this.#commandGuard(telegramUserId, commandUpdateId));
-    await this.#changes(
-      `INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
-       SELECT * FROM (VALUES ${tuples}) WHERE ${COMMAND_CURRENT}`,
-      ...values,
-    );
   }
 
   /** Current rule set of a user, largest lead time first. Empty when none. */
@@ -993,11 +964,21 @@ export class Repository {
         ...this.#commandGuard(telegramUserId, commandUpdateId),
       ),
     ];
-    for (const offset of normalized) {
-      statements.push(
-        this.#insertReminderOffsetStatement(telegramUserId, offset, now, commandUpdateId),
-      );
-    }
+    // SQLite's JSON1 extension is part of D1. One bound JSON value keeps a
+    // replacement of the maximum 100 rules within the batch and parameter
+    // limits, while the surrounding batch keeps delete and insert atomic.
+    statements.push(
+      this.#statement(
+        `INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
+         SELECT ?, CAST(value AS INTEGER), ?
+         FROM json_each(?)
+         WHERE ${COMMAND_CURRENT}`,
+        telegramUserId,
+        now,
+        JSON.stringify(normalized),
+        ...this.#commandGuard(telegramUserId, commandUpdateId),
+      ),
+    );
     const results = await this.#batchAtomic(statements);
     return results.some(
       (result) => reportedChanges(result as D1ResultLike<never>) > 0,
