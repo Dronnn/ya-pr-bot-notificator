@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { TelegramClient } from '../src/telegram/adapter.ts';
+import { BOT_COMMANDS } from '../src/telegram/replies.ts';
 import { createCapturedLogger, createFetchSpy, hangingHandler, jsonResponse, textResponse } from './helpers/fakes.ts';
 import { createHarness, TEST_BOT_TOKEN } from './helpers/harness.ts';
 
@@ -76,5 +77,21 @@ describe('telegram adapter', () => {
     await harness.telegram.sendMessage(1, 'a'.repeat(6000));
     const body = JSON.parse(String(harness.fetchSpy.calls[0]?.init?.body)) as { text: string };
     assert.equal(body.text.length <= 4096, true);
+  });
+
+  it('registers the command menu with setMyCommands and reports Telegram acceptance', async () => {
+    const harness = createHarness();
+    const accepted = await harness.telegram.setMyCommands(BOT_COMMANDS);
+    assert.equal(accepted, true);
+    const call = harness.fetchSpy.calls[0];
+    assert.equal(call?.url.includes('/setMyCommands'), true);
+    const body = JSON.parse(String(call?.init?.body)) as { commands: unknown };
+    assert.deepEqual(body.commands, BOT_COMMANDS);
+  });
+
+  it('reports a rejected command registration without throwing', async () => {
+    const harness = createHarness();
+    harness.setHandler(() => textResponse('bad', 400));
+    assert.equal(await harness.telegram.setMyCommands(BOT_COMMANDS), false);
   });
 });

@@ -154,6 +154,24 @@ export class TelegramClient {
   }
 
   /**
+   * Registers the command menu button. Idempotent and best-effort: the Worker
+   * calls it once per isolate, and a failed attempt is simply retried later.
+   */
+  async setMyCommands(
+    commands: readonly { command: string; description: string }[],
+  ): Promise<boolean> {
+    const result = await this.#call('setMyCommands', { commands }, this.#timeoutMs);
+    if (result.kind === 'ok') {
+      const json = result.json as { ok?: unknown } | null;
+      return json?.ok === true;
+    }
+    this.#logger?.debug('telegram_set_commands_failed', {
+      code: result.kind === 'network' ? result.code : 'http',
+    });
+    return false;
+  }
+
+  /**
    * One request under a single deadline that stays active after the headers
    * arrive: the body is read against the abort signal, cancellation is started
    * without awaiting it, and the timer is always cleared. A body-stream failure

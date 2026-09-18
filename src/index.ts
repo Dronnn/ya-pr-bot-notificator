@@ -15,6 +15,7 @@ import { readConfig, type AppConfig } from './config.ts';
 import { Repository } from './data/repository.ts';
 import type { OutboundJobMessage } from './platform.ts';
 import { platformFetch } from './platform.ts';
+import { BOT_COMMANDS } from './telegram/replies.ts';
 import { TelegramClient } from './telegram/adapter.ts';
 import { createLogger, type Logger } from './util.ts';
 import {
@@ -131,12 +132,37 @@ function createAppFromEnv(env: Env): WorkerApp {
   return createApp({ config, deps: createDeps(env, config.config) });
 }
 
+/**
+ * Registers the Telegram command menu once per isolate. The command list only
+ * changes with a deploy, so a module flag is enough state; a failed attempt
+ * leaves the flag down and the next invocation retries.
+ */
+let commandsRegistered = false;
+
+async function ensureBotCommands(env: Env): Promise<void> {
+  if (commandsRegistered) {
+    return;
+  }
+  const config = readConfig(env);
+  if (!config.ok) {
+    return;
+  }
+  try {
+    const client = createTelegramClient(config.config, createRedactingLogger(config.config));
+    commandsRegistered = await client.setMyCommands(BOT_COMMANDS);
+  } catch {
+    // Best-effort registration: never affect request or tick processing.
+  }
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    ctx.waitUntil(ensureBotCommands(env));
     return createAppFromEnv(env).fetch(request);
   },
 
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await ensureBotCommands(env);
     await createAppFromEnv(env).scheduled();
   },
 

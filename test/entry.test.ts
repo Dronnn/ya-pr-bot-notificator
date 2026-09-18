@@ -32,6 +32,19 @@ function queueBatch(messages: readonly unknown[]): MessageBatch<OutboundJobMessa
   return { queue: 'notifications', messages } as unknown as MessageBatch<OutboundJobMessage>;
 }
 
+/** Minimal execution context; `waitUntil` must not throw on a dropped promise. */
+function executionContext(): ExecutionContext {
+  return {
+    waitUntil(): void {},
+    passThroughOnException(): void {},
+  } as unknown as ExecutionContext;
+}
+
+/** Entry fetch with the runtime execution context attached. */
+function entryFetch(request: Request, env: Env): Promise<Response> {
+  return worker.fetch(request, env, executionContext());
+}
+
 /** Config plus both bindings, with one replaced by a throwing accessor. */
 function envWithThrowingBinding(name: 'DB' | 'NOTIFICATIONS'): Env {
   const harness = createHarness();
@@ -73,12 +86,12 @@ function trackedMessage(): {
 
 describe('worker entry point', () => {
   it('reports unavailable without configuration and does not leak values', async () => {
-    const health = await worker.fetch(new Request('https://bot.test/health'), {} as Env);
+    const health = await entryFetch(new Request('https://bot.test/health'), {} as Env);
     assert.equal(health.status, 503);
     const body = (await health.json()) as { missing: string[] };
     assert.ok(body.missing.length > 0);
 
-    const webhookResponse = await worker.fetch(
+    const webhookResponse = await entryFetch(
       new Request('https://bot.test/telegram/webhook', { method: 'POST', body: '{}' }),
       {} as Env,
     );
@@ -101,10 +114,10 @@ describe('worker entry point', () => {
         YANDEX_EXTENDED_ICAL_URL: 'https://example.test/extended.ics',
       } as unknown as Env;
 
-      const health = await worker.fetch(new Request('https://bot.test/health'), env);
+      const health = await entryFetch(new Request('https://bot.test/health'), env);
       assert.equal(health.status, 200);
 
-      const start = await worker.fetch(
+      const start = await entryFetch(
         webhookRequest({
           update_id: 1,
           message: {
@@ -139,7 +152,7 @@ describe('worker entry point', () => {
 
   it('reports unavailable when bindings are absent while configuration is complete', async () => {
     const env = configOnlyEnv();
-    const health = await worker.fetch(new Request('https://bot.test/health'), env);
+    const health = await entryFetch(new Request('https://bot.test/health'), env);
     assert.equal(health.status, 503);
     assert.deepEqual(await health.json(), {
       status: 'unavailable',
@@ -148,7 +161,7 @@ describe('worker entry point', () => {
 
     await worker.scheduled({} as ScheduledController, env);
 
-    const webhook = await worker.fetch(
+    const webhook = await entryFetch(
       new Request('https://bot.test/telegram/webhook', { method: 'POST', body: '{}' }),
       env,
     );
@@ -161,7 +174,7 @@ describe('worker entry point', () => {
       DB: { prepare: () => undefined, batch: 42 },
       NOTIFICATIONS: {},
     } as unknown as Env;
-    const health = await worker.fetch(new Request('https://bot.test/health'), env);
+    const health = await entryFetch(new Request('https://bot.test/health'), env);
     assert.equal(health.status, 503);
     assert.deepEqual(await health.json(), {
       status: 'unavailable',
@@ -171,7 +184,7 @@ describe('worker entry point', () => {
 
   it('degrades safely when the DB binding accessor throws', async () => {
     const env = envWithThrowingBinding('DB');
-    const health = await worker.fetch(new Request('https://bot.test/health'), env);
+    const health = await entryFetch(new Request('https://bot.test/health'), env);
     assert.equal(health.status, 503);
     assert.deepEqual(await health.json(), { status: 'unavailable', missing: ['DB'] });
 
@@ -185,7 +198,7 @@ describe('worker entry point', () => {
 
   it('degrades safely when the NOTIFICATIONS binding accessor throws', async () => {
     const env = envWithThrowingBinding('NOTIFICATIONS');
-    const health = await worker.fetch(new Request('https://bot.test/health'), env);
+    const health = await entryFetch(new Request('https://bot.test/health'), env);
     assert.equal(health.status, 503);
     assert.deepEqual(await health.json(), { status: 'unavailable', missing: ['NOTIFICATIONS'] });
 

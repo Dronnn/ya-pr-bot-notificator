@@ -72,6 +72,21 @@ export function resolveMenuCommand(text: string): string {
   return MENU_COMMANDS.get(text.trim().toLowerCase()) ?? text;
 }
 
+/**
+ * Bot command list shown in Telegram's command menu button. Registered by the
+ * Worker itself via `setMyCommands`, so no manual BotFather step is needed.
+ * Telegram requires lowercase `a-z0-9_` names (1-32 chars) and 1-256 char
+ * descriptions.
+ */
+export const BOT_COMMANDS: readonly { command: string; description: string }[] = [
+  { command: 'start', description: 'Начать и выбрать курс' },
+  { command: 'settings', description: 'Курс, напоминание, часовой пояс' },
+  { command: 'timezone', description: 'Выбрать или изменить часовой пояс' },
+  { command: 'events', description: 'Ближайшие занятия' },
+  { command: 'stop', description: 'Отключить напоминания' },
+  { command: 'help', description: 'Помощь' },
+];
+
 export const START_TEXT = 'Привет! Я присылаю напоминания о занятиях.';
 
 export const TIMEZONE_PROMPT_TEXT = [
