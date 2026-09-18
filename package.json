@@ -8,7 +8,10 @@
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "typegen": "WRANGLER_SEND_METRICS=false wrangler types",
-    "build": "WRANGLER_SEND_METRICS=false wrangler deploy --dry-run"
+    "build": "WRANGLER_SEND_METRICS=false wrangler deploy --dry-run",
+    "migrate:local": "WRANGLER_SEND_METRICS=false wrangler d1 migrations apply DB --local",
+    "migrate:remote": "WRANGLER_SEND_METRICS=false wrangler d1 migrations apply DB --remote",
+    "deploy": "npm run migrate:remote && WRANGLER_SEND_METRICS=false wrangler deploy"
   },
   "dependencies": {
     "ical.js": "^2.2.0"
