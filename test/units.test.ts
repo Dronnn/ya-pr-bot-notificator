@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { floatingWallClockToUtcMs } from '../src/calendar/floating-time.ts';
 import { readConfig } from '../src/config.ts';
+import { buildReminderText, formatReminderLeadTime } from '../src/telegram/replies.ts';
 import {
   MAX_TIME_ZONE_LENGTH,
   backoffMs,
@@ -76,26 +77,32 @@ describe('floating time resolution', () => {
 
 describe('time and text helpers', () => {
   it('renders an explicit timestamp in the requested timezone', () => {
-    assert.equal(formatUserTime(0, 'Europe/Moscow'), '1970-01-01 03:00 Europe/Moscow (GMT+3)');
-    assert.equal(formatUserTime(0, 'Asia/Yerevan'), '1970-01-01 04:00 Asia/Yerevan (GMT+4)');
+    assert.equal(formatUserTime(0, 'Europe/Moscow'), '01.01.1970 03:00 Europe/Moscow (GMT+3)');
+    assert.equal(formatUserTime(0, 'Asia/Yerevan'), '01.01.1970 04:00 Asia/Yerevan (GMT+4)');
   });
 
   it('renders DST-aware Berlin offsets with fixed Moscow and Yerevan offsets', () => {
     const summer = Date.UTC(2024, 6, 1, 10, 0, 0);
     const winter = Date.UTC(2024, 0, 15, 10, 0, 0);
-    assert.equal(formatUserTime(summer, 'Europe/Berlin'), '2024-07-01 12:00 Europe/Berlin (GMT+2)');
-    assert.equal(formatUserTime(winter, 'Europe/Berlin'), '2024-01-15 11:00 Europe/Berlin (GMT+1)');
-    assert.equal(formatUserTime(summer, 'Europe/Moscow'), '2024-07-01 13:00 Europe/Moscow (GMT+3)');
-    assert.equal(formatUserTime(winter, 'Europe/Moscow'), '2024-01-15 13:00 Europe/Moscow (GMT+3)');
-    assert.equal(formatUserTime(summer, 'Asia/Yerevan'), '2024-07-01 14:00 Asia/Yerevan (GMT+4)');
-    assert.equal(formatUserTime(winter, 'Asia/Yerevan'), '2024-01-15 14:00 Asia/Yerevan (GMT+4)');
+    assert.equal(formatUserTime(summer, 'Europe/Berlin'), '01.07.2024 12:00 Europe/Berlin (GMT+2)');
+    assert.equal(formatUserTime(winter, 'Europe/Berlin'), '15.01.2024 11:00 Europe/Berlin (GMT+1)');
+    assert.equal(formatUserTime(summer, 'Europe/Moscow'), '01.07.2024 13:00 Europe/Moscow (GMT+3)');
+    assert.equal(formatUserTime(winter, 'Europe/Moscow'), '15.01.2024 13:00 Europe/Moscow (GMT+3)');
+    assert.equal(formatUserTime(summer, 'Asia/Yerevan'), '01.07.2024 14:00 Asia/Yerevan (GMT+4)');
+    assert.equal(formatUserTime(winter, 'Asia/Yerevan'), '15.01.2024 14:00 Asia/Yerevan (GMT+4)');
     // Western zones keep their negative offsets (README documents `GMT-4`).
-    assert.equal(formatUserTime(summer, 'America/New_York'), '2024-07-01 06:00 America/New_York (GMT-4)');
-    assert.equal(formatUserTime(winter, 'America/New_York'), '2024-01-15 05:00 America/New_York (GMT-5)');
+    assert.equal(
+      formatUserTime(summer, 'America/New_York'),
+      '01.07.2024 06:00 America/New_York (GMT-4)',
+    );
+    assert.equal(
+      formatUserTime(winter, 'America/New_York'),
+      '15.01.2024 05:00 America/New_York (GMT-5)',
+    );
     // Midnight renders as 00:00 (h23), never 24:00.
     assert.equal(
       formatUserTime(Date.UTC(2024, 0, 15, 21), 'Europe/Moscow'),
-      '2024-01-16 00:00 Europe/Moscow (GMT+3)',
+      '16.01.2024 00:00 Europe/Moscow (GMT+3)',
     );
   });
 
@@ -124,6 +131,43 @@ describe('time and text helpers', () => {
     // Aliases resolve deterministically to the runtime-canonical identifier.
     assert.equal(normalizeTimeZone('US/Eastern'), 'America/New_York');
     assert.equal(normalizeTimeZone('GMT'), 'UTC');
+  });
+
+  it('renders a reminder lead time as Russian hours and minutes', () => {
+    assert.equal(formatReminderLeadTime(1), '1 минута');
+    assert.equal(formatReminderLeadTime(5), '5 минут');
+    assert.equal(formatReminderLeadTime(60), '1 час');
+    assert.equal(formatReminderLeadTime(61), '1 час 1 минута');
+    assert.equal(formatReminderLeadTime(90), '1 час 30 минут');
+    assert.equal(formatReminderLeadTime(121), '2 часа 1 минута');
+    assert.equal(formatReminderLeadTime(720), '12 часов');
+    assert.equal(formatReminderLeadTime(1440), '24 часа');
+    assert.equal(formatReminderLeadTime(11 * 60 + 11), '11 часов 11 минут');
+    assert.equal(formatReminderLeadTime(22 * 60 + 22), '22 часа 22 минуты');
+    assert.equal(formatReminderLeadTime(43200), '720 часов');
+  });
+
+  it('adds the configured lead time to the reminder text', () => {
+    const startsAtMs = Date.UTC(2026, 8, 15, 16, 0);
+    assert.equal(
+      buildReminderText(
+        'Работа с сетью',
+        startsAtMs,
+        'https://example.test/meeting',
+        'Europe/Moscow',
+        60,
+      ),
+      [
+        'Напоминание: Работа с сетью',
+        'До начала события: 1 час',
+        'Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)',
+        'https://example.test/meeting',
+      ].join('\n'),
+    );
+    assert.equal(
+      buildReminderText('X', startsAtMs, null, 'Europe/Moscow', null),
+      ['Напоминание: X', 'Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)'].join('\n'),
+    );
   });
 
   it('clamps text without splitting surrogate pairs', () => {

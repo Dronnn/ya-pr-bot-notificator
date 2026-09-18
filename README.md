@@ -81,7 +81,8 @@ Course Calendar Notifier — Telegram-бот для преподавателя �
 
 ```text
 Напоминание: Работа с сетью в iOS
-Начало: 2026-09-15 19:00 Europe/Moscow (GMT+3)
+До начала события: 24 часа
+Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)
 https://example.test/meeting
 ```
 

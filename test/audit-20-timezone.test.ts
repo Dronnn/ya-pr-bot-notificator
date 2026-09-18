@@ -521,9 +521,9 @@ describe('Timezone settings and rendering', () => {
     // The default clock is 2023-11-14T22:13:20Z; the lesson starts ten minutes
     // later. Berlin is on winter time (GMT+1), the other two are fixed offsets.
     const zones: readonly (readonly [number, string, string])[] = [
-      [21, 'Europe/Moscow', '2023-11-15 01:23 Europe/Moscow (GMT+3)'],
-      [22, 'Asia/Yerevan', '2023-11-15 02:23 Asia/Yerevan (GMT+4)'],
-      [23, 'Europe/Berlin', '2023-11-14 23:23 Europe/Berlin (GMT+1)'],
+      [21, 'Europe/Moscow', '15.11.2023 01:23 Europe/Moscow (GMT+3)'],
+      [22, 'Asia/Yerevan', '15.11.2023 02:23 Asia/Yerevan (GMT+4)'],
+      [23, 'Europe/Berlin', '14.11.2023 23:23 Europe/Berlin (GMT+1)'],
     ];
     for (const [userId, zone] of zones) {
       await harness.repository.activateUser(userId, userId, now);
@@ -567,7 +567,7 @@ describe('Timezone settings and rendering', () => {
     await deliver(harness, queuedJobId(harness, 3));
     const text = sentTexts(harness).at(-1) ?? '';
     assert.equal((await harness.repository.getUser(USER_ID))?.active, false);
-    assert.ok(text.includes('2023-11-14 23:23 Europe/Berlin (GMT+1)'), text);
+    assert.ok(text.includes('14.11.2023 23:23 Europe/Berlin (GMT+1)'), text);
     assert.match(text, /Lesson/);
   });
 
@@ -591,7 +591,7 @@ describe('Timezone settings and rendering', () => {
     assert.equal(await processQueueMessage(makeQueueMessage(jobId), deps), 'sent');
     assert.equal(waits, 1, 'the pace wait was taken');
     assert.ok(
-      sentTexts(harness).at(-1)?.includes('2023-11-14 23:23 Europe/Berlin (GMT+1)'),
+      sentTexts(harness).at(-1)?.includes('14.11.2023 23:23 Europe/Berlin (GMT+1)'),
       'the reservation after the wait reads the changed zone',
     );
   });
@@ -850,7 +850,7 @@ describe('Timezone settings and rendering', () => {
     const statements = harness.repository.statementsUsed();
     assert.equal(outcome, 'sent');
     const text = sentTexts(harness).at(-1) ?? '';
-    assert.ok(text.includes('2023-11-14 23:23 Europe/Berlin (GMT+1)'), text);
+    assert.ok(text.includes('14.11.2023 23:23 Europe/Berlin (GMT+1)'), text);
     assert.equal(text.includes('Europe/Moscow'), false);
 
     const delivered = await harness.repository.getJob(jobId);

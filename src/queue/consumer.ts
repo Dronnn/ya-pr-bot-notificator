@@ -779,6 +779,7 @@ async function processReminder(
         startsAtMs,
         context.occurrenceUrl,
         canonical,
+        context.reminderOffsetMinutes,
       ),
     );
   });

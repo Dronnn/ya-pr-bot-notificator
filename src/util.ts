@@ -166,7 +166,7 @@ export function normalizeTimeZone(value: string): string | null {
  * Explicit, unambiguous local rendering in the stored user timezone: local
  * date, local time, the IANA identifier and the offset in effect at that
  * instant (`GMT+N`, DST-aware), e.g.
- * `2024-07-01 12:00 Europe/Berlin (GMT+2)`.
+ * `01.07.2024 12:00 Europe/Berlin (GMT+2)`.
  */
 export function formatUserTime(epochMs: number, timeZone: string): string {
   assertSafeInteger(epochMs, 'epochMs');
@@ -184,7 +184,7 @@ export function formatUserTime(epochMs: number, timeZone: string): string {
   const pick = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((part) => part.type === type)?.value ?? '';
   const offset = pick('timeZoneName');
-  const rendered = `${pick('year')}-${pick('month')}-${pick('day')} ${pick('hour')}:${pick('minute')} ${timeZone}`;
+  const rendered = `${pick('day')}.${pick('month')}.${pick('year')} ${pick('hour')}:${pick('minute')} ${timeZone}`;
   return offset.length === 0 ? rendered : `${rendered} (${offset})`;
 }
 

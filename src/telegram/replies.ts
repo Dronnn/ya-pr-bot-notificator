@@ -60,6 +60,40 @@ export function formatReminderOffsets(offsets: readonly ReminderOffsetMinutes[])
 }
 
 /**
+ * Russian count form for a whole number: `1 час`, `3 часа`, `11 часов`. The
+ * last-two-digits check is required because `11..14` take the many-form.
+ */
+function formatCount(value: number, one: string, few: string, many: string): string {
+  const lastTwo = value % 100;
+  const last = value % 10;
+  if (last === 1 && lastTwo !== 11) {
+    return `${value} ${one}`;
+  }
+  if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) {
+    return `${value} ${few}`;
+  }
+  return `${value} ${many}`;
+}
+
+/**
+ * A reminder's configured lead time as whole hours and minutes, e.g.
+ * `24 часа`, `1 час 30 минут`, `5 минут`. Zero components are omitted; a rule
+ * is at least one minute, so the result is never empty.
+ */
+export function formatReminderLeadTime(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const parts: string[] = [];
+  if (hours > 0) {
+    parts.push(formatCount(hours, 'час', 'часа', 'часов'));
+  }
+  if (minutes > 0) {
+    parts.push(formatCount(minutes, 'минута', 'минуты', 'минут'));
+  }
+  return parts.join(' ');
+}
+
+/**
  * Reminder control keyboard. The three standard rules are toggle buttons
  * (enabled/disabled in place); custom rules get an edit and a delete button.
  * Callback payloads carry the offset directly and are parsed back by the
@@ -269,8 +303,13 @@ export function buildReminderText(
   startsAtMs: number,
   url: string | null,
   timeZone: string,
+  offsetMinutes: number | null,
 ): string {
-  const lines = [`Напоминание: ${summary}`, `Начало: ${formatUserTime(startsAtMs, timeZone)}`];
+  const lines = [`Напоминание: ${summary}`];
+  if (offsetMinutes !== null) {
+    lines.push(`До начала события: ${formatReminderLeadTime(offsetMinutes)}`);
+  }
+  lines.push(`Начало: ${formatUserTime(startsAtMs, timeZone)}`);
   if (hasUrl(url)) {
     lines.push(url);
   }
