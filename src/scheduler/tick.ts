@@ -49,6 +49,8 @@ export interface TickDeps {
 export interface TickResult {
   repaired: number;
   syncStatuses: string[];
+  /** Per-source skip/failure reason, aligned by index with `syncStatuses`. */
+  syncReasons: (string | null)[];
   enqueued: number;
 }
 
@@ -99,10 +101,12 @@ export async function runSchedulerTick(
   // a large (or unlucky) source defers instead of starving the planning,
   // enqueue and cleanup tail of the same tick.
   const syncStatuses: SyncStatus[] = [];
+  const syncReasons: (string | null)[] = [];
   for (const source of deps.sources) {
     try {
       if (!forceRefresh && mondayStartMs === null && !(await mayRunInitialFetch(deps, source))) {
         syncStatuses.push('skipped');
+        syncReasons.push(null);
         continue;
       }
       const result = await runSourceSync(
@@ -120,8 +124,10 @@ export async function runSchedulerTick(
         deps.ownerFactory(),
       );
       syncStatuses.push(result.status);
+      syncReasons.push(result.reason);
     } catch {
       syncStatuses.push('error');
+      syncReasons.push(null);
       deps.logger.warn('source_sync_crashed', { source: source.id });
     }
   }
@@ -161,5 +167,5 @@ export async function runSchedulerTick(
   await deps.repository.cleanup(now, RETENTION_MS, CLEANUP_LIMIT);
 
   deps.logger.info('scheduler_tick', { repaired, enqueued });
-  return { repaired, syncStatuses, enqueued };
+  return { repaired, syncStatuses, syncReasons, enqueued };
 }

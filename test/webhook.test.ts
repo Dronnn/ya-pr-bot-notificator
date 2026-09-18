@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createApp } from '../src/worker/app.ts';
-import { MS_PER_MINUTE } from '../src/util.ts';
+import { MS_PER_MINUTE, SOURCE_LEASE_MS } from '../src/util.ts';
 import { countRows } from './helpers/d1-sqlite.ts';
 import {
   buildTestApp,
@@ -89,6 +89,34 @@ describe('webhook endpoint', () => {
     );
     assert.deepEqual(await duplicate.json(), { status: 'duplicate' });
     assert.equal(harness.fetchSpy.calls.length, 2, 'a Telegram retry does not refresh twice');
+  });
+
+  it('reports a source skipped by the live refresh lease as a recent refresh, not an error', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(harness, [
+      { id: 'basic', kind: 'basic', url: 'https://example.test/basic.ics' },
+      { id: 'extended', kind: 'extended', url: 'https://example.test/extended.ics' },
+    ]);
+    const now = harness.now();
+    await harness.repository.acquireSourceLease('basic', 'previous-refresh', now, SOURCE_LEASE_MS);
+    await harness.repository.acquireSourceLease(
+      'extended',
+      'previous-refresh',
+      now,
+      SOURCE_LEASE_MS,
+    );
+
+    const response = await app.fetch(
+      webhookRequest(messageUpdate(33, TEST_CALENDAR_REFRESH_SECRET)),
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(harness.fetchSpy.calls.length, 0, 'the live lease suppresses a duplicate fetch');
+    const result = String(allJobs(harness)[1]?.payload_json);
+    assert.match(result, /Обновление календарей завершено\./);
+    assert.doesNotMatch(result, /с ошибками/);
+    assert.match(result, /basic: пропущен \(недавнее обновление\)/);
+    assert.match(result, /extended: пропущен \(недавнее обновление\)/);
   });
 
   it('does not treat a near-match as the private refresh text', async () => {

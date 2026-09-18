@@ -88,21 +88,33 @@ function isManualCalendarRefresh(
   return secret !== null && update.kind === 'message' && constantTimeEqual(update.text, secret);
 }
 
-function manualRefreshResultText(deps: AppDeps, statuses: readonly string[]): string {
+function manualRefreshResultText(
+  deps: AppDeps,
+  statuses: readonly string[],
+  reasons: readonly (string | null)[],
+): string {
   const lines = deps.sources.map((source, index) => {
     const status = statuses[index] ?? 'error';
+    const reason = reasons[index] ?? null;
     const label =
       status === 'applied'
         ? 'обновлён'
         : status === 'not-modified'
           ? 'без изменений'
-          : status === 'skipped'
-            ? 'пропущен'
-            : 'ошибка';
+          : status === 'skipped' && reason === 'lease-held'
+            ? 'пропущен (недавнее обновление)'
+            : status === 'skipped'
+              ? 'пропущен'
+              : 'ошибка';
     return `${source.id}: ${label}`;
   });
-  const successful = statuses.length === deps.sources.length && statuses.every(
-    (status) => status === 'applied' || status === 'not-modified',
+  // A source skipped because the anti-hammer lease is still live was already
+  // refreshed moments ago: it is not an error, unlike other skips or failures.
+  const successful = statuses.length === deps.sources.length && deps.sources.every(
+    (_source, index) =>
+      statuses[index] === 'applied' ||
+      statuses[index] === 'not-modified' ||
+      (statuses[index] === 'skipped' && reasons[index] === 'lease-held'),
   );
   return `${successful ? 'Обновление календарей завершено.' : 'Обновление календарей завершено с ошибками.'}\n${lines.join('\n')}`;
 }
@@ -230,7 +242,7 @@ async function processWebhookUpdate(
         await enqueueOperatorReply(
           deps,
           parsed.update,
-          manualRefreshResultText(deps, result.syncStatuses),
+          manualRefreshResultText(deps, result.syncStatuses, result.syncReasons),
           `calendar-refresh:${updateId}:result`,
         );
       } catch {
