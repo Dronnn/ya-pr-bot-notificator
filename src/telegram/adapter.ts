@@ -24,9 +24,22 @@ export interface InlineKeyboardButton {
   callback_data: string;
 }
 
-export interface ReplyMarkup {
+export interface ReplyKeyboardButton {
+  text: string;
+}
+
+export interface InlineKeyboardMarkup {
   inline_keyboard: InlineKeyboardButton[][];
 }
+
+export interface ReplyKeyboardMarkup {
+  keyboard: ReplyKeyboardButton[][];
+  resize_keyboard?: boolean;
+  is_persistent?: boolean;
+}
+
+/** Either markup Telegram accepts in `reply_markup`; one per message. */
+export type ReplyMarkup = InlineKeyboardMarkup | ReplyKeyboardMarkup;
 
 export type SendOutcome =
   | { ok: true; messageId: number }

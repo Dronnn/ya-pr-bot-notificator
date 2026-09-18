@@ -79,7 +79,9 @@ import {
   EVENTS_GUIDANCE_TEXT,
   HELP_TEXT,
   INACTIVE_GUIDANCE_TEXT,
+  MENU_KEYBOARD,
   REMINDER_KEYBOARD,
+  resolveMenuCommand,
   SETTINGS_KEYBOARD,
   START_TEXT,
   STOPPED_TEXT,
@@ -227,7 +229,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
       }
       if (user === null || !user.active) {
         // No activation, no job mutation: only point the sender back to /start.
-        await enqueueReply(deps, update, { text: INACTIVE_GUIDANCE_TEXT }, user?.revision ?? null);
+        await enqueueReply(
+          deps,
+          update,
+          { text: INACTIVE_GUIDANCE_TEXT, replyMarkup: MENU_KEYBOARD },
+          user?.revision ?? null,
+        );
         return;
       }
       await enqueueReply(
@@ -252,7 +259,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
       }
       if (user === null || !user.active) {
         // /stop stays authoritative: a timezone command never reactivates.
-        await enqueueReply(deps, update, { text: INACTIVE_GUIDANCE_TEXT }, user?.revision ?? null);
+        await enqueueReply(
+          deps,
+          update,
+          { text: INACTIVE_GUIDANCE_TEXT, replyMarkup: MENU_KEYBOARD },
+          user?.revision ?? null,
+        );
         return;
       }
       if (argument.length === 0) {
@@ -306,9 +318,14 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
         return;
       }
       if (existingUser === null) {
-        // No subscription row: `/start` is required first and the timezone
-        // choice follows there, so no buttons are attached to this guidance.
-        await enqueueReply(deps, update, { text: EVENTS_GUIDANCE_TEXT }, null);
+        // No subscription row yet: `/start` is required first, and the menu
+        // keeps the way back one tap away.
+        await enqueueReply(
+          deps,
+          update,
+          { text: EVENTS_GUIDANCE_TEXT, replyMarkup: MENU_KEYBOARD },
+          null,
+        );
         return;
       }
       // A missing or malformed durable zone gets the same timezone guidance:
@@ -336,7 +353,10 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
       await enqueueReply(
         deps,
         update,
-        { text: buildEventsText(occurrences, existingUser.course, timeZone) },
+        {
+          text: buildEventsText(occurrences, existingUser.course, timeZone),
+          replyMarkup: MENU_KEYBOARD,
+        },
         existingUser.revision,
       );
       return;
@@ -355,7 +375,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
         return;
       }
       const user = await deps.repository.getUser(update.userId);
-      await enqueueReply(deps, update, { text: STOPPED_TEXT }, user?.revision ?? null);
+      await enqueueReply(
+        deps,
+        update,
+        { text: STOPPED_TEXT, replyMarkup: MENU_KEYBOARD },
+        user?.revision ?? null,
+      );
       return;
     }
     default: {
@@ -366,7 +391,12 @@ async function handleCommand(deps: HandlerDeps, update: PrivateMessageUpdate): P
       if (!(await isCurrentCommand(deps, update))) {
         return;
       }
-      await enqueueReply(deps, update, { text: HELP_TEXT }, user?.revision ?? null);
+      await enqueueReply(
+        deps,
+        update,
+        { text: HELP_TEXT, replyMarkup: MENU_KEYBOARD },
+        user?.revision ?? null,
+      );
     }
   }
 }
@@ -529,7 +559,7 @@ async function enqueueReply(
  * only place that interprets it.
  */
 function parseCommand(text: string): { command: string; argument: string } {
-  const trimmed = text.trim();
+  const trimmed = resolveMenuCommand(text.trim());
   const separator = trimmed.search(/\s/);
   const token = separator === -1 ? trimmed : trimmed.slice(0, separator);
   const at = token.indexOf('@');

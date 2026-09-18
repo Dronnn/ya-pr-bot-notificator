@@ -7,9 +7,9 @@
 import type { OccurrenceView } from '../data/repository.ts';
 import type { Course, ReminderOffsetMinutes } from '../domain/notification-policy.ts';
 import { formatUserTime } from '../util.ts';
-import type { ReplyMarkup } from './adapter.ts';
+import type { InlineKeyboardMarkup, ReplyKeyboardMarkup } from './adapter.ts';
 
-export const TIMEZONE_KEYBOARD: ReplyMarkup = {
+export const TIMEZONE_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
     [
       { text: 'Europe/Moscow', callback_data: 'tz:Europe/Moscow' },
@@ -18,7 +18,7 @@ export const TIMEZONE_KEYBOARD: ReplyMarkup = {
   ],
 };
 
-export const COURSE_KEYBOARD: ReplyMarkup = {
+export const COURSE_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
     [
       { text: 'Базовый курс', callback_data: 'course:basic' },
@@ -27,7 +27,7 @@ export const COURSE_KEYBOARD: ReplyMarkup = {
   ],
 };
 
-export const REMINDER_KEYBOARD: ReplyMarkup = {
+export const REMINDER_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
     [{ text: 'За 30 минут', callback_data: 'reminder:30' }],
     [{ text: 'За сутки', callback_data: 'reminder:1440' }],
@@ -35,13 +35,42 @@ export const REMINDER_KEYBOARD: ReplyMarkup = {
 };
 
 /** Settings view: timezone choices next to the existing course/reminder controls. */
-export const SETTINGS_KEYBOARD: ReplyMarkup = {
+export const SETTINGS_KEYBOARD: InlineKeyboardMarkup = {
   inline_keyboard: [
     ...TIMEZONE_KEYBOARD.inline_keyboard,
     ...COURSE_KEYBOARD.inline_keyboard,
     ...REMINDER_KEYBOARD.inline_keyboard,
   ],
 };
+
+/**
+ * Persistent bottom menu. A Telegram message carries either an inline keyboard
+ * or a reply keyboard, never both, so this menu rides on the text-only replies
+ * (`/help`, `/events`, `/stop`, guidance) and then stays visible for the chat.
+ */
+export const MENU_KEYBOARD: ReplyKeyboardMarkup = {
+  keyboard: [
+    [{ text: 'Настройки' }, { text: 'Часовой пояс' }],
+    [{ text: 'Ближайшие занятия' }, { text: 'Помощь' }],
+  ],
+  resize_keyboard: true,
+  is_persistent: true,
+};
+
+/**
+ * Reply-keyboard labels resolve to the same commands as their slash forms, so a
+ * button tap and a typed command share one handler path.
+ */
+export const MENU_COMMANDS: ReadonlyMap<string, string> = new Map([
+  ['настройки', '/settings'],
+  ['часовой пояс', '/timezone'],
+  ['ближайшие занятия', '/events'],
+  ['помощь', '/help'],
+]);
+
+export function resolveMenuCommand(text: string): string {
+  return MENU_COMMANDS.get(text.trim().toLowerCase()) ?? text;
+}
 
 export const START_TEXT = 'Привет! Я присылаю напоминания о занятиях.';
 
@@ -58,7 +87,9 @@ export const HELP_TEXT = `Доступные команды:
 /settings - изменить курс, время напоминания и часовой пояс
 /timezone - выбрать или изменить часовой пояс, например /timezone Asia/Yerevan
 /events - ближайшие занятия
-/stop - отключить напоминания`;
+/stop - отключить напоминания
+
+Кнопки меню внизу экрана повторяют эти команды.`;
 
 export const STOPPED_TEXT = 'Напоминания отключены. Вернуться можно командой /start.';
 

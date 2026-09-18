@@ -281,20 +281,42 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isInlineKeyboard(value: Record<string, unknown>): boolean {
+  const rows = value.inline_keyboard;
+  return (
+    Array.isArray(rows) &&
+    rows.every(
+      (row) =>
+        Array.isArray(row) &&
+        row.every(
+          (button) =>
+            isRecord(button) &&
+            typeof button.text === 'string' &&
+            typeof button.callback_data === 'string',
+        ),
+    )
+  );
+}
+
+function isReplyKeyboard(value: Record<string, unknown>): boolean {
+  const rows = value.keyboard;
+  return (
+    Array.isArray(rows) &&
+    rows.every(
+      (row) =>
+        Array.isArray(row) &&
+        row.every((button) => isRecord(button) && typeof button.text === 'string'),
+    ) &&
+    (value.resize_keyboard === undefined || typeof value.resize_keyboard === 'boolean') &&
+    (value.is_persistent === undefined || typeof value.is_persistent === 'boolean')
+  );
+}
+
 function isReplyMarkup(value: unknown): value is ReplyMarkup {
-  if (!isRecord(value) || !Array.isArray(value.inline_keyboard)) {
+  if (!isRecord(value)) {
     return false;
   }
-  return value.inline_keyboard.every(
-    (row) =>
-      Array.isArray(row) &&
-      row.every(
-        (button) =>
-          isRecord(button) &&
-          typeof button.text === 'string' &&
-          typeof button.callback_data === 'string',
-      ),
-  );
+  return isInlineKeyboard(value) || isReplyKeyboard(value);
 }
 
 /** Parses a stored reply payload; null when it is missing or malformed. */
