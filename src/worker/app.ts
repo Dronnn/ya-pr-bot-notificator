@@ -18,11 +18,11 @@ import type { ConfigResult } from '../config.ts';
 import type { Repository } from '../data/repository.ts';
 import { readBoundedStream } from '../http-body.ts';
 import type { MessageBatchLike, OutboundJobMessage, QueueProducerLike } from '../platform.ts';
-import { runSchedulerTick } from '../scheduler/tick.ts';
+import { runSchedulerTick, type TickDeps } from '../scheduler/tick.ts';
 import { processQueueBatch } from '../queue/consumer.ts';
 import { TelegramClient } from '../telegram/adapter.ts';
 import { handleUpdate } from '../telegram/handlers.ts';
-import { parseUpdate } from '../telegram/updates.ts';
+import { parseUpdate, type ParsedUpdate } from '../telegram/updates.ts';
 import {
   constantTimeEqual,
   MAX_WEBHOOK_BODY_BYTES,
@@ -47,6 +47,8 @@ export interface AppDeps {
   random: () => number;
   eventsLimit: number;
   webhookSecret: string;
+  /** Optional Worker Secret; absent means the manual refresh path is disabled. */
+  calendarRefreshSecret: string | null;
 }
 
 export interface WorkerApp {
@@ -76,6 +78,55 @@ function json(body: unknown, status: number): Response {
 function hasValidSecret(request: Request, expectedSecret: string): boolean {
   const providedSecret = request.headers.get(SECRET_HEADER) ?? '';
   return constantTimeEqual(providedSecret, expectedSecret);
+}
+
+/** Exact private text match for the optional operator-only calendar refresh. */
+function isManualCalendarRefresh(
+  update: ParsedUpdate,
+  secret: string | null,
+): boolean {
+  return secret !== null && update.kind === 'message' && constantTimeEqual(update.text, secret);
+}
+
+function manualRefreshResultText(deps: AppDeps, statuses: readonly string[]): string {
+  const lines = deps.sources.map((source, index) => {
+    const status = statuses[index] ?? 'error';
+    const label =
+      status === 'applied'
+        ? 'обновлён'
+        : status === 'not-modified'
+          ? 'без изменений'
+          : status === 'skipped'
+            ? 'пропущен'
+            : 'ошибка';
+    return `${source.id}: ${label}`;
+  });
+  const successful = statuses.length === deps.sources.length && statuses.every(
+    (status) => status === 'applied' || status === 'not-modified',
+  );
+  return `${successful ? 'Обновление календарей завершено.' : 'Обновление календарей завершено с ошибками.'}\n${lines.join('\n')}`;
+}
+
+async function enqueueOperatorReply(
+  deps: AppDeps,
+  update: ParsedUpdate,
+  text: string,
+  dedupKey: string,
+): Promise<void> {
+  const now = deps.now();
+  const jobId = deps.idFactory();
+  await deps.repository.insertCommandJob({
+    id: jobId,
+    telegramUserId: update.userId,
+    chatId: update.chatId,
+    payloadJson: JSON.stringify({ text }),
+    dedupKey,
+    sendAtMs: now,
+    now,
+    expectedRevision: null,
+    sourceUpdateId: null,
+  });
+  await deps.queue.sendBatch([{ body: { jobId } }]);
 }
 
 function extractUpdateId(payload: unknown): number | null {
@@ -167,15 +218,40 @@ async function processWebhookUpdate(
   }
 
   try {
-    await handleUpdate(parsed.update, {
-      repository: deps.repository,
-      telegram: deps.telegram,
-      queue: deps.queue,
-      now: deps.now,
-      logger: deps.logger,
-      idFactory: deps.idFactory,
-      eventsLimit: deps.eventsLimit,
-    });
+    if (isManualCalendarRefresh(parsed.update, deps.calendarRefreshSecret)) {
+      await enqueueOperatorReply(
+        deps,
+        parsed.update,
+        'Принял. Начал обновление календарей.',
+        `calendar-refresh:${updateId}:accepted`,
+      );
+      try {
+        const result = await runSchedulerTick(schedulerTickDeps(deps), { forceRefresh: true });
+        await enqueueOperatorReply(
+          deps,
+          parsed.update,
+          manualRefreshResultText(deps, result.syncStatuses),
+          `calendar-refresh:${updateId}:result`,
+        );
+      } catch {
+        await enqueueOperatorReply(
+          deps,
+          parsed.update,
+          'Обновление календарей не удалось завершить.',
+          `calendar-refresh:${updateId}:result`,
+        );
+      }
+    } else {
+      await handleUpdate(parsed.update, {
+        repository: deps.repository,
+        telegram: deps.telegram,
+        queue: deps.queue,
+        now: deps.now,
+        logger: deps.logger,
+        idFactory: deps.idFactory,
+        eventsLimit: deps.eventsLimit,
+      });
+    }
   } catch {
     await deps.repository.releaseUpdate(updateId, leaseOwner);
     deps.logger.error('update_processing_failed', { updateId });
@@ -194,6 +270,21 @@ async function processWebhookUpdate(
     return json({ status: 'busy' }, 503);
   }
   return json({ status: 'ok' }, 200);
+}
+
+function schedulerTickDeps(deps: AppDeps): TickDeps {
+  return {
+    repository: deps.repository,
+    queue: deps.queue,
+    now: deps.now,
+    logger: deps.logger,
+    parser: deps.parser,
+    fetch: deps.fetch,
+    sourceTimeZone: deps.sourceTimeZone,
+    fetchTimeoutMs: deps.fetchTimeoutMs,
+    sources: deps.sources,
+    ownerFactory: deps.idFactory,
+  };
 }
 
 async function handleWebhook(request: Request, deps: AppDeps): Promise<Response> {
@@ -273,19 +364,7 @@ export function createApp(input: CreateAppInput): WorkerApp {
         // Nothing can run without configuration or runtime bindings.
         return;
       }
-      const deps = mode.deps;
-      await runSchedulerTick({
-        repository: deps.repository,
-        queue: deps.queue,
-        now: deps.now,
-        logger: deps.logger,
-        parser: deps.parser,
-        fetch: deps.fetch,
-        sourceTimeZone: deps.sourceTimeZone,
-        fetchTimeoutMs: deps.fetchTimeoutMs,
-        sources: deps.sources,
-        ownerFactory: deps.idFactory,
-      });
+      await runSchedulerTick(schedulerTickDeps(mode.deps));
     },
 
     async queue(batch: MessageBatchLike<OutboundJobMessage>): Promise<void> {

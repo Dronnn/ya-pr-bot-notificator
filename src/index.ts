@@ -28,12 +28,13 @@ import {
 } from './worker/app.ts';
 
 /** Redacts every config value that carries a secret: tokens and calendar URLs. */
-function createRedactingLogger(config: AppConfig): Logger {
+function createRedactingLogger(config: AppConfig, extraSecrets: readonly string[] = []): Logger {
   return createLogger((line) => console.log(line), [
     config.telegramBotToken,
     config.telegramWebhookSecret,
     config.basicIcalUrl,
     config.extendedIcalUrl,
+    ...extraSecrets,
   ]);
 }
 
@@ -101,7 +102,14 @@ function missingRuntimeBindings(env: Env): string[] {
 }
 
 export function createDeps(env: Env, config: AppConfig): AppDeps {
-  const logger = createRedactingLogger(config);
+  const calendarRefreshSecret =
+    typeof env.CALENDAR_REFRESH_SECRET === 'string' && env.CALENDAR_REFRESH_SECRET.length > 0
+      ? env.CALENDAR_REFRESH_SECRET
+      : null;
+  const logger = createRedactingLogger(
+    config,
+    calendarRefreshSecret === null ? [] : [calendarRefreshSecret],
+  );
   return {
     repository: new Repository(env.DB),
     telegram: createTelegramClient(config, logger),
@@ -117,6 +125,7 @@ export function createDeps(env: Env, config: AppConfig): AppDeps {
     random: Math.random,
     eventsLimit: DEFAULT_EVENTS_LIMIT,
     webhookSecret: config.telegramWebhookSecret,
+    calendarRefreshSecret,
   };
 }
 

@@ -10,6 +10,7 @@
 interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
+  CALENDAR_REFRESH_SECRET?: string;
   YANDEX_BASIC_ICAL_URL?: string;
   YANDEX_EXTENDED_ICAL_URL?: string;
 }

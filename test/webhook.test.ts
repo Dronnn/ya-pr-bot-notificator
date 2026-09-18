@@ -7,11 +7,13 @@ import { countRows } from './helpers/d1-sqlite.ts';
 import {
   buildTestApp,
   createHarness,
+  TEST_CALENDAR_REFRESH_SECRET,
   TEST_WEBHOOK_SECRET,
   webhookRequest,
   type Harness,
 } from './helpers/harness.ts';
-import { occurrence, onboardUser, seedSource } from './helpers/seed.ts';
+import { EMPTY_ICS, occurrence, onboardUser, seedSource } from './helpers/seed.ts';
+import { textResponse } from './helpers/fakes.ts';
 
 function messageUpdate(updateId: number, text: string, chatType = 'private'): unknown {
   return {
@@ -58,6 +60,53 @@ function updateLeaseOwner(harness: Harness, updateId: number): string | null {
 }
 
 describe('webhook endpoint', () => {
+  it('runs an authorized exact text refresh for both calendars without a reply job', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(harness, [
+      { id: 'basic', kind: 'basic', url: 'https://example.test/basic.ics' },
+      { id: 'extended', kind: 'extended', url: 'https://example.test/extended.ics' },
+    ]);
+    harness.setHandler(() => textResponse(EMPTY_ICS, 200));
+
+    const response = await app.fetch(
+      webhookRequest(messageUpdate(30, TEST_CALENDAR_REFRESH_SECRET)),
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 'ok' });
+    assert.deepEqual(
+      harness.fetchSpy.calls.map((call) => call.url),
+      ['https://example.test/basic.ics', 'https://example.test/extended.ics'],
+    );
+    const refreshJobs = allJobs(harness);
+    assert.equal(refreshJobs.length, 2, 'the private text creates only accepted/result replies');
+    assert.match(String(refreshJobs[0]?.payload_json), /Начал обновление календарей/);
+    assert.match(String(refreshJobs[1]?.payload_json), /завершено/);
+    assert.equal(updateStatus(harness, 30), 'done');
+
+    const duplicate = await app.fetch(
+      webhookRequest(messageUpdate(30, TEST_CALENDAR_REFRESH_SECRET)),
+    );
+    assert.deepEqual(await duplicate.json(), { status: 'duplicate' });
+    assert.equal(harness.fetchSpy.calls.length, 2, 'a Telegram retry does not refresh twice');
+  });
+
+  it('does not treat a near-match as the private refresh text', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(harness, [
+      { id: 'basic', kind: 'basic', url: 'https://example.test/basic.ics' },
+      { id: 'extended', kind: 'extended', url: 'https://example.test/extended.ics' },
+    ]);
+
+    const response = await app.fetch(
+      webhookRequest(messageUpdate(31, `${TEST_CALENDAR_REFRESH_SECRET} `)),
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(harness.fetchSpy.calls.length, 0, 'the near-match stays an ordinary message');
+    assert.equal(allJobs(harness).length, 1, 'ordinary text receives the normal help reply');
+  });
+
   it('reports unavailable without config and leaks no values', async () => {
     const app = createApp({
       config: { ok: false, missing: ['TELEGRAM_BOT_TOKEN'] },

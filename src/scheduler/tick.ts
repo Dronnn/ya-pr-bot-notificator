@@ -52,6 +52,11 @@ export interface TickResult {
   enqueued: number;
 }
 
+export interface SchedulerTickOptions {
+  /** Bypass the Monday gate for an explicitly authorized manual refresh. */
+  forceRefresh?: boolean;
+}
+
 /**
  * Start of the current Monday in Europe/Moscow, or null outside Monday.
  * Moscow is fixed at UTC+03:00, matching the source and display timezone.
@@ -80,11 +85,15 @@ async function mayRunInitialFetch(deps: TickDeps, source: SourceDefinition): Pro
   return stored === null || (stored.fetchedAtMs === null && stored.status === 'unknown');
 }
 
-export async function runSchedulerTick(deps: TickDeps): Promise<TickResult> {
+export async function runSchedulerTick(
+  deps: TickDeps,
+  options: SchedulerTickOptions = {},
+): Promise<TickResult> {
   deps.repository.beginInvocation(MAX_D1_STATEMENTS_PER_SCHEDULER);
   const startNow = deps.now();
   const repaired = await deps.repository.repairExpiredLeases(startNow);
   const mondayStartMs = currentMoscowMondayStartMs(startNow);
+  const forceRefresh = options.forceRefresh === true;
 
   // Sources run sequentially so each sync sees the remaining invocation budget:
   // a large (or unlucky) source defers instead of starving the planning,
@@ -92,7 +101,7 @@ export async function runSchedulerTick(deps: TickDeps): Promise<TickResult> {
   const syncStatuses: SyncStatus[] = [];
   for (const source of deps.sources) {
     try {
-      if (mondayStartMs === null && !(await mayRunInitialFetch(deps, source))) {
+      if (!forceRefresh && mondayStartMs === null && !(await mayRunInitialFetch(deps, source))) {
         syncStatuses.push('skipped');
         continue;
       }
@@ -105,7 +114,7 @@ export async function runSchedulerTick(deps: TickDeps): Promise<TickResult> {
           logger: deps.logger,
           sourceTimeZone: deps.sourceTimeZone,
           fetchTimeoutMs: deps.fetchTimeoutMs,
-          skipIfFetchedAtOrAfterMs: mondayStartMs ?? undefined,
+          skipIfFetchedAtOrAfterMs: forceRefresh ? undefined : mondayStartMs ?? undefined,
         },
         source,
         deps.ownerFactory(),

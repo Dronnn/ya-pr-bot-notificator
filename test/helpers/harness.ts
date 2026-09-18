@@ -36,6 +36,7 @@ import {
 
 export const TEST_BOT_TOKEN = '123456789:AAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 export const TEST_WEBHOOK_SECRET = 'webhook-secret-value';
+export const TEST_CALENDAR_REFRESH_SECRET = 'calendar-refresh-secret-value';
 
 export interface Harness {
   db: SqliteD1;
@@ -142,6 +143,7 @@ export function buildTestApp(
     random: harness.random,
     eventsLimit: 10,
     webhookSecret: TEST_WEBHOOK_SECRET,
+    calendarRefreshSecret: TEST_CALENDAR_REFRESH_SECRET,
   };
   return createApp({ config, deps });
 }
