@@ -23,6 +23,7 @@ import { processQueueBatch } from '../queue/consumer.ts';
 import { TelegramClient } from '../telegram/adapter.ts';
 import { handleUpdate } from '../telegram/handlers.ts';
 import { parseUpdate, type ParsedUpdate } from '../telegram/updates.ts';
+import type { AdminNotify } from './admin-alerts.ts';
 import {
   constantTimeEqual,
   MAX_WEBHOOK_BODY_BYTES,
@@ -49,6 +50,8 @@ export interface AppDeps {
   webhookSecret: string;
   /** Optional Worker Secret; absent means the manual refresh path is disabled. */
   calendarRefreshSecret: string | null;
+  /** Operator alerting; absent means failures are only logged. */
+  notifyAdmin: AdminNotify | null;
 }
 
 export interface WorkerApp {
@@ -376,7 +379,14 @@ export function createApp(input: CreateAppInput): WorkerApp {
         // Nothing can run without configuration or runtime bindings.
         return;
       }
-      await runSchedulerTick(schedulerTickDeps(mode.deps));
+      try {
+        await runSchedulerTick(schedulerTickDeps(mode.deps));
+      } catch (error) {
+        // The platform would log the rejection anyway; the alert makes the
+        // failure visible to the operator without watching the dashboard.
+        await mode.deps.notifyAdmin?.('scheduled_tick_failed', error);
+        throw error;
+      }
     },
 
     async queue(batch: MessageBatchLike<OutboundJobMessage>): Promise<void> {
@@ -389,14 +399,20 @@ export function createApp(input: CreateAppInput): WorkerApp {
         return;
       }
       const deps = mode.deps;
-      await processQueueBatch(batch, {
-        repository: deps.repository,
-        telegram: deps.telegram,
-        now: deps.now,
-        logger: deps.logger,
-        random: deps.random,
-        ownerFactory: deps.idFactory,
-      });
+      try {
+        await processQueueBatch(batch, {
+          repository: deps.repository,
+          telegram: deps.telegram,
+          now: deps.now,
+          logger: deps.logger,
+          random: deps.random,
+          ownerFactory: deps.idFactory,
+        });
+      } catch (error) {
+        // Rethrowing keeps the batch retryable; the alert only adds visibility.
+        await deps.notifyAdmin?.('queue_batch_failed', error);
+        throw error;
+      }
     },
   };
 }

@@ -17,7 +17,7 @@ import type { OutboundJobMessage } from './platform.ts';
 import { platformFetch } from './platform.ts';
 import { BOT_COMMANDS } from './telegram/replies.ts';
 import { TelegramClient } from './telegram/adapter.ts';
-import { createLogger, type Logger } from './util.ts';
+import { createLogger, redactText, type Logger } from './util.ts';
 import {
   createApp,
   DEFAULT_EVENTS_LIMIT,
@@ -26,16 +26,35 @@ import {
   type AppDeps,
   type WorkerApp,
 } from './worker/app.ts';
+import { createAdminNotifier } from './worker/admin-alerts.ts';
 
-/** Redacts every config value that carries a secret: tokens and calendar URLs. */
-function createRedactingLogger(config: AppConfig, extraSecrets: readonly string[] = []): Logger {
-  return createLogger((line) => console.log(line), [
+/** Every config value that must never appear in logs or alert texts. */
+function secretValues(config: AppConfig, extraSecrets: readonly string[] = []): string[] {
+  return [
     config.telegramBotToken,
     config.telegramWebhookSecret,
     config.basicIcalUrl,
     config.extendedIcalUrl,
     ...extraSecrets,
-  ]);
+  ];
+}
+
+/** Redacts every config value that carries a secret: tokens and calendar URLs. */
+function createRedactingLogger(config: AppConfig, extraSecrets: readonly string[] = []): Logger {
+  return createLogger((line) => console.log(line), secretValues(config, extraSecrets));
+}
+
+/** A positive digit string enables alerting; anything else keeps it off. */
+function parseAdminUserId(value: unknown): number | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const id = Number(trimmed);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 function createCalendarSources(config: AppConfig): SourceDefinition[] {
@@ -106,17 +125,31 @@ export function createDeps(env: Env, config: AppConfig): AppDeps {
     typeof env.CALENDAR_REFRESH_SECRET === 'string' && env.CALENDAR_REFRESH_SECRET.length > 0
       ? env.CALENDAR_REFRESH_SECRET
       : null;
-  const logger = createRedactingLogger(
-    config,
-    calendarRefreshSecret === null ? [] : [calendarRefreshSecret],
-  );
+  const extraSecrets = calendarRefreshSecret === null ? [] : [calendarRefreshSecret];
+  const secrets = secretValues(config, extraSecrets);
+  const logger = createLogger((line) => console.log(line), secrets);
+  const repository = new Repository(env.DB);
+  const telegram = createTelegramClient(config, logger);
+  const now = (): number => Date.now();
+  const adminUserId = parseAdminUserId(env.ADMIN_TELEGRAM_USER_ID);
+  const notifyAdmin =
+    adminUserId === null
+      ? null
+      : createAdminNotifier({
+          telegram,
+          repository,
+          now,
+          logger,
+          adminUserId,
+          redact: (text) => redactText(text, secrets),
+        });
   return {
-    repository: new Repository(env.DB),
-    telegram: createTelegramClient(config, logger),
+    repository,
+    telegram,
     queue: env.NOTIFICATIONS,
     parser: new IcalJsCalendarParser(),
     fetch: platformFetch,
-    now: () => Date.now(),
+    now,
     logger,
     sources: createCalendarSources(config),
     fetchTimeoutMs: DEFAULT_FETCH_TIMEOUT_MS,
@@ -126,6 +159,7 @@ export function createDeps(env: Env, config: AppConfig): AppDeps {
     eventsLimit: DEFAULT_EVENTS_LIMIT,
     webhookSecret: config.telegramWebhookSecret,
     calendarRefreshSecret,
+    notifyAdmin,
   };
 }
 

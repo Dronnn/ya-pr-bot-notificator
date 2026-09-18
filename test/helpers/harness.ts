@@ -17,6 +17,7 @@ import type { ConsumerDeps } from '../../src/queue/consumer.ts';
 import type { TickDeps } from '../../src/scheduler/tick.ts';
 import type { Clock } from '../../src/util.ts';
 import { createApp, type AppDeps, type WorkerApp } from '../../src/worker/app.ts';
+import type { AdminNotify } from '../../src/worker/admin-alerts.ts';
 import { applyMigrations, createSqliteD1, type SqliteD1 } from './d1-sqlite.ts';
 import {
   createCapturedLogger,
@@ -119,6 +120,7 @@ export function buildTestApp(
   harness: Harness,
   sources: SourceDefinition[] = [],
   calendarRefreshSecret: string | null = TEST_CALENDAR_REFRESH_SECRET,
+  notifyAdmin: AdminNotify | null = null,
 ): WorkerApp {
   const config: ConfigReady = {
     ok: true,
@@ -145,6 +147,7 @@ export function buildTestApp(
     eventsLimit: 10,
     webhookSecret: TEST_WEBHOOK_SECRET,
     calendarRefreshSecret,
+    notifyAdmin,
   };
   return createApp({ config, deps });
 }
