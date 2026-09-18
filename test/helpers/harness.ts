@@ -118,6 +118,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
 export function buildTestApp(
   harness: Harness,
   sources: SourceDefinition[] = [],
+  calendarRefreshSecret: string | null = TEST_CALENDAR_REFRESH_SECRET,
 ): WorkerApp {
   const config: ConfigReady = {
     ok: true,
@@ -143,7 +144,7 @@ export function buildTestApp(
     random: harness.random,
     eventsLimit: 10,
     webhookSecret: TEST_WEBHOOK_SECRET,
-    calendarRefreshSecret: TEST_CALENDAR_REFRESH_SECRET,
+    calendarRefreshSecret,
   };
   return createApp({ config, deps });
 }

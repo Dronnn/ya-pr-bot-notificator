@@ -12,6 +12,7 @@ import { jsonResponse } from './helpers/fakes.ts';
 import {
   createHarness,
   TEST_BOT_TOKEN,
+  TEST_CALENDAR_REFRESH_SECRET,
   TEST_WEBHOOK_SECRET,
   webhookRequest,
 } from './helpers/harness.ts';
@@ -145,6 +146,54 @@ describe('worker entry point', () => {
 
       assert.equal(batch[0]?.acked, true);
       assert.equal((await harness.repository.getJob(jobId))?.status, 'sent');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('only refreshes calendars for the private text when CALENDAR_REFRESH_SECRET is bound', async () => {
+    const harness = createHarness();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = harness.fetchSpy.fetch;
+    try {
+      harness.setHandler(() => jsonResponse({ ok: true, result: { message_id: 1 } }));
+      const baseEnv = {
+        DB: harness.db,
+        NOTIFICATIONS: harness.queue.producer,
+        TELEGRAM_BOT_TOKEN: TEST_BOT_TOKEN,
+        TELEGRAM_WEBHOOK_SECRET: TEST_WEBHOOK_SECRET,
+        YANDEX_BASIC_ICAL_URL: 'https://example.test/basic.ics',
+        YANDEX_EXTENDED_ICAL_URL: 'https://example.test/extended.ics',
+      };
+      const trigger = (updateId: number): unknown => ({
+        update_id: updateId,
+        message: {
+          message_id: updateId,
+          chat: { id: 111, type: 'private' },
+          from: { id: 111, username: 'andrew' },
+          text: TEST_CALENDAR_REFRESH_SECRET,
+        },
+      });
+      const icsCalls = (): string[] =>
+        harness.fetchSpy.calls.filter((call) => call.url.endsWith('.ics')).map((call) => call.url);
+
+      const withoutSecret = await entryFetch(
+        webhookRequest(trigger(50)),
+        baseEnv as unknown as Env,
+      );
+      assert.equal(withoutSecret.status, 200);
+      assert.deepEqual(icsCalls(), [], 'an unset binding leaves the calendar path disabled');
+
+      const refreshed = await entryFetch(
+        webhookRequest(trigger(51)),
+        { ...baseEnv, CALENDAR_REFRESH_SECRET: TEST_CALENDAR_REFRESH_SECRET } as unknown as Env,
+      );
+      assert.equal(refreshed.status, 200);
+      assert.deepEqual(
+        icsCalls(),
+        ['https://example.test/basic.ics', 'https://example.test/extended.ics'],
+        'a bound secret refreshes both calendars',
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }

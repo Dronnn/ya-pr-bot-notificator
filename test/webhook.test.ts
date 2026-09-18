@@ -107,6 +107,29 @@ describe('webhook endpoint', () => {
     assert.equal(allJobs(harness).length, 1, 'ordinary text receives the normal help reply');
   });
 
+  it('treats the trigger text as an ordinary message when the secret is not configured', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(
+      harness,
+      [
+        { id: 'basic', kind: 'basic', url: 'https://example.test/basic.ics' },
+        { id: 'extended', kind: 'extended', url: 'https://example.test/extended.ics' },
+      ],
+      null,
+    );
+
+    const response = await app.fetch(
+      webhookRequest(messageUpdate(32, TEST_CALENDAR_REFRESH_SECRET)),
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: 'ok' });
+    assert.equal(harness.fetchSpy.calls.length, 0, 'no calendar refresh without the binding');
+    const jobs = allJobs(harness);
+    assert.equal(jobs.length, 1, 'an absent secret cannot create operator refresh jobs');
+    assert.match(String(jobs[0]?.payload_json), /Доступные команды/);
+  });
+
   it('reports unavailable without config and leaks no values', async () => {
     const app = createApp({
       config: { ok: false, missing: ['TELEGRAM_BOT_TOKEN'] },
