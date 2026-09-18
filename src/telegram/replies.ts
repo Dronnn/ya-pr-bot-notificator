@@ -7,6 +7,7 @@
 import type { OccurrenceView } from '../data/repository.ts';
 import {
   DEFAULT_REMINDER_OFFSETS,
+  START_REMINDER_OFFSET_MINUTES,
   type Course,
   type ReminderOffsetMinutes,
 } from '../domain/notification-policy.ts';
@@ -33,6 +34,9 @@ export const COURSE_KEYBOARD: InlineKeyboardMarkup = {
 
 /** Human label of a lead time, for buttons and the settings summary. */
 export function offsetLabel(offset: ReminderOffsetMinutes): string {
+  if (offset === START_REMINDER_OFFSET_MINUTES) {
+    return 'в момент начала';
+  }
   if (offset === 1440) {
     return 'за сутки';
   }
@@ -56,7 +60,13 @@ export function formatReminderOffsets(offsets: readonly ReminderOffsetMinutes[])
   if (offsets.length === 0) {
     return 'выключены';
   }
-  return offsets.map((offset) => `${offsetLabel(offset)} (${offset} мин.)`).join(', ');
+  return offsets
+    .map((offset) =>
+      offset === START_REMINDER_OFFSET_MINUTES
+        ? offsetLabel(offset)
+        : `${offsetLabel(offset)} (${offset} мин.)`,
+    )
+    .join(', ');
 }
 
 /**
@@ -94,22 +104,24 @@ export function formatReminderLeadTime(totalMinutes: number): string {
 }
 
 /**
- * Reminder control keyboard. The three standard rules are toggle buttons
- * (enabled/disabled in place); custom rules get an edit and a delete button.
- * Callback payloads carry the offset directly and are parsed back by the
- * handler, so only one row is needed per rule.
+ * Reminder control keyboard. The at-start notification and the three standard
+ * rules are toggle buttons (enabled/disabled in place); custom rules get an
+ * edit and a delete button. Callback payloads carry the offset directly and
+ * are parsed back by the handler, so only one row is needed per rule.
  */
 export function buildRemindersKeyboard(
   offsets: readonly ReminderOffsetMinutes[],
 ): InlineKeyboardMarkup {
   const enabled = new Set(offsets);
   const rows: { text: string; callback_data: string }[][] = [];
+  const startState = enabled.has(START_REMINDER_OFFSET_MINUTES) ? 'вкл' : 'выкл';
+  rows.push([{ text: `В момент начала [${startState}]`, callback_data: 'rm:t:0' }]);
   for (const offset of DEFAULT_REMINDER_OFFSETS) {
     const state = enabled.has(offset) ? 'вкл' : 'выкл';
     rows.push([{ text: `${offsetLabel(offset)} [${state}]`, callback_data: `rm:t:${offset}` }]);
   }
   for (const offset of offsets) {
-    if (DEFAULT_REMINDER_OFFSETS.includes(offset)) {
+    if (offset === START_REMINDER_OFFSET_MINUTES || DEFAULT_REMINDER_OFFSETS.includes(offset)) {
       continue;
     }
     rows.push([
@@ -118,7 +130,7 @@ export function buildRemindersKeyboard(
     ]);
   }
   rows.push([{ text: 'Добавить время', callback_data: 'rm:add' }]);
-  if (offsets.length > 0) {
+  if (offsets.some((offset) => offset !== START_REMINDER_OFFSET_MINUTES)) {
     rows.push([{ text: 'Убрать все', callback_data: 'rm:clear' }]);
   }
   return { inline_keyboard: rows };
@@ -193,7 +205,7 @@ export const TIMEZONE_INVALID_TEXT =
 export const HELP_TEXT = `Доступные команды:
 /start - начать и выбрать курс
 /settings - изменить курс, напоминания и часовой пояс
-/reminders - настроить время напоминаний (add/del/edit/clear)
+/reminders - настроить время напоминаний (add/del/edit/clear/start on|off)
 /timezone - выбрать или изменить часовой пояс, например /timezone Asia/Yerevan
 /events - ближайшие занятия
 /stop - отключить напоминания
@@ -256,18 +268,22 @@ export function buildCoursePromptText(): string {
 }
 
 /**
- * Reminder settings view: the enabled rules plus the exact command forms for
- * adding, editing, deleting and clearing rules. The buttons below carry the
- * per-rule actions.
+ * Reminder settings view: the at-start notification state, the enabled lead
+ * times plus the exact command forms for adding, editing, deleting and
+ * clearing rules. The at-start notification is stored as offset 0, is not a
+ * lead time and is shown as its own line instead of a rule bullet. The buttons
+ * below carry the per-rule actions.
  */
 export function buildRemindersText(offsets: readonly ReminderOffsetMinutes[]): string {
+  const rules = offsets.filter((offset) => offset !== START_REMINDER_OFFSET_MINUTES);
   const lines = [
-    `Напоминания (правил: ${offsets.length}):`,
+    `Напоминания (правил: ${rules.length}):`,
+    `В момент начала: ${offsets.includes(START_REMINDER_OFFSET_MINUTES) ? 'включено' : 'выключено'}`,
   ];
   if (offsets.length === 0) {
     lines.push('Сейчас напоминания выключены.');
   } else {
-    for (const offset of offsets) {
+    for (const offset of rules) {
       lines.push(`- ${offsetLabel(offset)} (${offset} мин.)`);
     }
   }
@@ -276,6 +292,7 @@ export function buildRemindersText(offsets: readonly ReminderOffsetMinutes[]): s
     'Изменить: /reminders edit 60 90',
     'Удалить: /reminders del 60',
     'Убрать все: /reminders clear',
+    'Уведомление в момент начала: /reminders start on|off',
   );
   return lines.join('\n');
 }
@@ -305,8 +322,13 @@ export function buildReminderText(
   timeZone: string,
   offsetMinutes: number | null,
 ): string {
-  const lines = [`Напоминание: ${summary}`];
-  if (offsetMinutes !== null) {
+  // The at-start notification has no lead time and no "Напоминание:" prefix:
+  // it opens with the upcoming start itself.
+  const lines =
+    offsetMinutes === START_REMINDER_OFFSET_MINUTES
+      ? [`Занятие начинается: ${summary}`]
+      : [`Напоминание: ${summary}`];
+  if (offsetMinutes !== null && offsetMinutes !== START_REMINDER_OFFSET_MINUTES) {
     lines.push(`До начала события: ${formatReminderLeadTime(offsetMinutes)}`);
   }
   lines.push(`Начало: ${formatUserTime(startsAtMs, timeZone)}`);

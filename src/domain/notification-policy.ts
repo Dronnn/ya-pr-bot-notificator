@@ -15,7 +15,20 @@ export type Course = 'basic' | 'extended';
 /** A single reminder lead time in minutes before the occurrence start. */
 export type ReminderOffsetMinutes = number;
 
-/** Smallest accepted lead time: one minute. Zero would collide with the start. */
+/**
+ * The at-start notification is stored as the special offset 0: it fires when
+ * the occurrence starts, is seeded by default and is toggled independently of
+ * the lead-time rules. It is not accepted by the `add`/`edit` commands.
+ */
+export const START_REMINDER_OFFSET_MINUTES = 0;
+/**
+ * Delivery slack for the at-start notification: if the exact start instant
+ * cannot be sent (pacing, 429, a retry), it may still go out this much later.
+ * Lead-time reminders keep expiring at the start.
+ */
+export const START_REMINDER_GRACE_MS = 5 * 60_000;
+
+/** Smallest accepted lead time: one minute. Zero means the event start itself. */
 export const MIN_REMINDER_OFFSET_MINUTES = 1;
 /**
  * Largest accepted lead time: thirty days. This is deliberately the same
@@ -46,6 +59,11 @@ export type DeliveryDecision =
 export interface DeliveryInput {
   nowMs: number;
   startsAtMs: number;
+  /**
+   * Instant the delivery window closes. Equals `startsAtMs` for lead-time
+   * rules; the at-start notification passes `startsAtMs + grace`.
+   */
+  expiresAtMs: number;
   sendAtMs: number;
   nextAttemptAtMs: number;
   active: boolean;
@@ -72,22 +90,35 @@ export function isValidReminderOffset(value: unknown): value is ReminderOffsetMi
 }
 
 /**
+ * Whether `value` may be stored as a rule offset: the user-facing lead times
+ * plus the special at-start offset 0.
+ */
+export function isStoredReminderOffset(value: unknown): value is ReminderOffsetMinutes {
+  return value === START_REMINDER_OFFSET_MINUTES || isValidReminderOffset(value);
+}
+
+/**
  * Validates, de-duplicates and orders a candidate rule set (largest lead time
- * first). Returns null when any value is invalid or the set exceeds
- * `MAX_REMINDER_RULES_PER_USER`; never coerces.
+ * first). The at-start offset does not count toward
+ * `MAX_REMINDER_RULES_PER_USER`. Returns null when any value is invalid or the
+ * set exceeds the rule budget; never coerces.
  */
 export function normalizeReminderOffsets(
   values: readonly number[],
 ): number[] | null {
-  if (!Array.isArray(values) || values.length > MAX_REMINDER_RULES_PER_USER) {
+  if (!Array.isArray(values)) {
     return null;
   }
   const unique = new Set<number>();
   for (const value of values) {
-    if (!isValidReminderOffset(value)) {
+    if (!isStoredReminderOffset(value)) {
       return null;
     }
     unique.add(value);
+  }
+  const rules = [...unique].filter((value) => value !== START_REMINDER_OFFSET_MINUTES);
+  if (rules.length > MAX_REMINDER_RULES_PER_USER) {
+    return null;
   }
   return [...unique].sort((left, right) => right - left);
 }
@@ -121,11 +152,11 @@ export function calculateReminderAt(
  *
  * The decision ladder is total and strictly ordered:
  * 1. skip: the first applicable reason from `skipReasonFor`;
- * 2. expired: the event has already started (`hasStarted`);
+ * 2. expired: the delivery window has closed (`expiresAtMs`);
  * 3. wait: nowMs is before `dueAtMs`, the max of sendAtMs and the retry time;
  * 4. send: otherwise.
  * Skip outranks expiry, expiry outranks wait, and a send can never happen
- * before sendAtMs or after the event has started.
+ * before sendAtMs or after the window closes.
  */
 export function evaluateDelivery(input: DeliveryInput): DeliveryDecision {
   assertDeliveryInput(input);
@@ -134,7 +165,7 @@ export function evaluateDelivery(input: DeliveryInput): DeliveryDecision {
   if (skipReason !== null) {
     return { kind: 'skip', reason: skipReason };
   }
-  if (hasStarted(input)) {
+  if (windowClosed(input)) {
     return { kind: 'expired' };
   }
 
@@ -149,6 +180,7 @@ export function evaluateDelivery(input: DeliveryInput): DeliveryDecision {
 function assertDeliveryInput(input: DeliveryInput): void {
   assertTimeMs(input.nowMs, 'nowMs');
   assertTimeMs(input.startsAtMs, 'startsAtMs');
+  assertTimeMs(input.expiresAtMs, 'expiresAtMs');
   assertTimeMs(input.sendAtMs, 'sendAtMs');
   assertTimeMs(input.nextAttemptAtMs, 'nextAttemptAtMs');
   assertRevision(input.expectedRevision, 'expectedRevision');
@@ -159,6 +191,9 @@ function assertDeliveryInput(input: DeliveryInput): void {
   assertCourse(input.eventCourse, 'eventCourse');
   if (input.sendAtMs > input.startsAtMs) {
     throw new RangeError('sendAtMs must not be after startsAtMs');
+  }
+  if (input.startsAtMs > input.expiresAtMs) {
+    throw new RangeError('expiresAtMs must not be before startsAtMs');
   }
 }
 
@@ -207,9 +242,12 @@ function skipReasonFor(input: DeliveryInput): SkipReason | null {
   return null;
 }
 
-/** An event expires at its own start; a reminder is never sent late. */
-function hasStarted(input: DeliveryInput): boolean {
-  return input.nowMs >= input.startsAtMs;
+/**
+ * A lead-time reminder expires at its own start; only the at-start
+ * notification passes a later `expiresAtMs` (start plus its grace window).
+ */
+function windowClosed(input: DeliveryInput): boolean {
+  return input.nowMs >= input.expiresAtMs;
 }
 
 /** Earliest instant the candidate may be sent: sendAtMs unless a later retry is due. */

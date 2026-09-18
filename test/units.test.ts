@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 
 import { floatingWallClockToUtcMs } from '../src/calendar/floating-time.ts';
 import { readConfig } from '../src/config.ts';
-import { buildReminderText, formatReminderLeadTime } from '../src/telegram/replies.ts';
+import {
+  buildReminderText,
+  buildRemindersKeyboard,
+  buildRemindersText,
+  formatReminderLeadTime,
+  formatReminderOffsets,
+  offsetLabel,
+} from '../src/telegram/replies.ts';
 import {
   MAX_TIME_ZONE_LENGTH,
   backoffMs,
@@ -167,6 +174,84 @@ describe('time and text helpers', () => {
     assert.equal(
       buildReminderText('X', startsAtMs, null, 'Europe/Moscow', null),
       ['Напоминание: X', 'Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)'].join('\n'),
+    );
+  });
+
+  it('renders the at-start notification without a lead-time line', () => {
+    const startsAtMs = Date.UTC(2026, 8, 15, 16, 0);
+    assert.equal(
+      buildReminderText(
+        'Работа с сетью',
+        startsAtMs,
+        'https://example.test/meeting',
+        'Europe/Moscow',
+        0,
+      ),
+      [
+        'Занятие начинается: Работа с сетью',
+        'Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)',
+        'https://example.test/meeting',
+      ].join('\n'),
+    );
+    assert.equal(
+      buildReminderText('X', startsAtMs, null, 'Europe/Moscow', 0),
+      ['Занятие начинается: X', 'Начало: 15.09.2026 19:00 Europe/Moscow (GMT+3)'].join('\n'),
+    );
+  });
+
+  it('labels the at-start offset and keeps the summary clear about it', () => {
+    assert.equal(offsetLabel(0), 'в момент начала');
+    assert.equal(offsetLabel(5), 'за 5 минут');
+    assert.equal(formatReminderOffsets([]), 'выключены');
+    assert.equal(formatReminderOffsets([0]), 'в момент начала');
+    assert.equal(
+      formatReminderOffsets([1440, 60, 5, 0]),
+      'за сутки (1440 мин.), за 1 час (60 мин.), за 5 минут (5 мин.), в момент начала',
+    );
+  });
+
+  it('renders the reminder settings view with the start state', () => {
+    const withStart = buildRemindersText([1440, 60, 5, 0]);
+    assert.match(withStart, /^Напоминания \(правил: 3\):/);
+    assert.match(withStart, /В момент начала: включено/);
+    assert.doesNotMatch(withStart, /- в момент начала/);
+    assert.match(withStart, /\/reminders start on\|off/);
+    assert.match(withStart, /\/reminders add 90/);
+    assert.match(withStart, /\/reminders edit 60 90/);
+    assert.match(withStart, /\/reminders del 60/);
+    assert.match(withStart, /\/reminders clear/);
+
+    assert.match(buildRemindersText([1440]), /В момент начала: выключено/);
+    const cleared = buildRemindersText([0]);
+    assert.match(cleared, /^Напоминания \(правил: 0\):/);
+    assert.doesNotMatch(cleared, /выключены/);
+    assert.match(buildRemindersText([]), /Сейчас напоминания выключены/);
+  });
+
+  it('puts the start toggle first and never renders it as a custom rule', () => {
+    const keyboard = buildRemindersKeyboard([1440, 60, 5, 0]);
+    assert.deepEqual(keyboard.inline_keyboard[0], [
+      { text: 'В момент начала [вкл]', callback_data: 'rm:t:0' },
+    ]);
+    assert.equal(
+      keyboard.inline_keyboard.some((row) =>
+        row.some((button) => button.callback_data === 'rm:del:0' || button.callback_data === 'rm:edit:0'),
+      ),
+      false,
+    );
+    const offKeyboard = buildRemindersKeyboard([]);
+    assert.deepEqual(offKeyboard.inline_keyboard[0], [
+      { text: 'В момент начала [выкл]', callback_data: 'rm:t:0' },
+    ]);
+    assert.deepEqual(
+      offKeyboard.inline_keyboard.map((row) => row.map((button) => button.text)),
+      [
+        ['В момент начала [выкл]'],
+        ['за сутки [выкл]'],
+        ['за 1 час [выкл]'],
+        ['за 5 минут [выкл]'],
+        ['Добавить время'],
+      ],
     );
   });
 

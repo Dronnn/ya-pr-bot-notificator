@@ -57,8 +57,12 @@ export const TELEGRAM_TIMEOUT_MS = 10_000;
 // Per-invocation D1 statement budgets and chunking.
 export const MAX_D1_STATEMENTS_PER_CONSUMER = 50;
 export const MAX_D1_STATEMENTS_PER_SCHEDULER = 50;
-/** Statements each source sync must leave for the tick's planning, enqueue and cleanup tail. */
-export const SYNC_TAIL_RESERVE = 8;
+/**
+ * Statements each source sync must leave for the tick tail: the lead-time and
+ * at-start planning statements (2), stale-job cancellation (1) and cleanup (7);
+ * the claim loop reserves its own room and stops when the budget runs low.
+ */
+export const SYNC_TAIL_RESERVE = 10;
 /**
  * Worst-case repository statements one queue message may execute, measured on
  * the final code (single-statement `acquireSendSlot`, claim-time join for

@@ -14,6 +14,7 @@ import {
   DEFAULT_REMINDER_OFFSETS,
   MAX_REMINDER_OFFSET_MINUTES,
   MAX_REMINDER_RULES_PER_USER,
+  START_REMINDER_OFFSET_MINUTES,
 } from '../src/domain/notification-policy.ts';
 import { REMINDERS_INVALID_TEXT } from '../src/telegram/replies.ts';
 import {
@@ -112,15 +113,15 @@ async function activeUser(harness: Harness): Promise<void> {
 }
 
 describe('reminder rule defaults', () => {
-  it('a new user gets exactly the three standard rules', async () => {
+  it('a new user gets the three standard rules plus the at-start notification', async () => {
     const harness = createHarness();
     const now = harness.clock.now();
     await harness.repository.activateUser(USER_ID, USER_ID, now);
 
     assert.deepEqual(
       await harness.repository.listReminderOffsets(USER_ID),
-      [...DEFAULT_REMINDER_OFFSETS],
-      '1440/60/5 are enabled by default',
+      [...DEFAULT_REMINDER_OFFSETS, 0],
+      '1440/60/5 and the at-start notification are enabled by default',
     );
     assert.deepEqual(DEFAULT_REMINDER_OFFSETS, [1440, 60, 5]);
   });
@@ -129,6 +130,9 @@ describe('reminder rule defaults', () => {
     const harness = createHarness();
     const now = harness.clock.now();
     await activeUser(harness);
+    // Isolate the lead-time rules: the at-start notification has its own
+    // planning path and is covered by the consumer regressions.
+    await harness.repository.setUserReminderOffsets(USER_ID, [...DEFAULT_REMINDER_OFFSETS], now);
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'due', startsAtMs: now + MS_PER_MINUTE })],
       now,
@@ -153,6 +157,7 @@ describe('reminder rule defaults', () => {
     const harness = createHarness();
     const now = harness.clock.now();
     await activeUser(harness);
+    await harness.repository.setUserReminderOffsets(USER_ID, [...DEFAULT_REMINDER_OFFSETS], now);
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'due', startsAtMs: now + MS_PER_MINUTE })],
       now,
@@ -204,6 +209,7 @@ describe('reminder rule sets', () => {
     const harness = createHarness();
     const now = harness.clock.now();
     await activeUser(harness);
+    await harness.repository.setUserReminderOffsets(USER_ID, [...DEFAULT_REMINDER_OFFSETS], now);
     await harness.repository.upsertOccurrences(
       [occurrence({ occurrenceKey: 'due', startsAtMs: now + MS_PER_MINUTE })],
       now,
@@ -259,7 +265,7 @@ describe('reminder rule sets', () => {
     await harness.repository.activateUser(USER_ID, USER_ID, now);
     await harness.repository.setUserReminderOffsets(USER_ID, [], now);
 
-    assert.equal(await harness.repository.addReminderOffset(USER_ID, 0, now), false);
+    assert.equal(await harness.repository.addReminderOffset(USER_ID, -1, now), false);
     assert.equal(
       await harness.repository.addReminderOffset(USER_ID, MAX_REMINDER_OFFSET_MINUTES + 1, now),
       false,
@@ -313,6 +319,20 @@ describe('reminder rule sets', () => {
       MAX_REMINDER_RULES_PER_USER,
       'the rejected rule did not extend the set',
     );
+    assert.equal(
+      await harness.repository.addReminderOffset(
+        USER_ID,
+        START_REMINDER_OFFSET_MINUTES,
+        now,
+      ),
+      true,
+      'the at-start notification can be enabled at the lead-time cap',
+    );
+    assert.deepEqual(
+      (await harness.repository.listReminderOffsets(USER_ID)).length,
+      MAX_REMINDER_RULES_PER_USER + 1,
+      'the at-start offset does not count toward the rule cap',
+    );
   });
 });
 
@@ -360,41 +380,110 @@ describe('reminder settings command', () => {
     const harness = createHarness();
     const deps = handlerDeps(harness);
     await handleUpdate(messageUpdate(1, '/start'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
 
     await handleUpdate(messageUpdate(2, '/reminders add 90'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 90, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 90, 60, 5, 0]);
 
     await handleUpdate(messageUpdate(3, '/reminders edit 90 120'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 120, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 120, 60, 5, 0]);
 
     await handleUpdate(messageUpdate(4, '/reminders del 120'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
 
     await handleUpdate(messageUpdate(5, '/reminders clear'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), []);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [0],
+      'clear removes the lead-time rules and keeps the at-start notification',
+    );
     assert.match(lastJobPayload(harness).text ?? '', /Напоминания/);
   });
 
-  it('keeps the set empty when /start follows /reminders clear', async () => {
+  it('keeps the at-start notification when /start follows /reminders clear', async () => {
     const harness = createHarness();
     const deps = handlerDeps(harness);
 
     await handleUpdate(messageUpdate(1, '/start'), deps);
     assert.deepEqual(
       await harness.repository.listReminderOffsets(USER_ID),
-      [1440, 60, 5],
-      'a first /start seeds the standard rules',
+      [1440, 60, 5, 0],
+      'a first /start seeds the standard rules and the at-start notification',
     );
 
     await handleUpdate(messageUpdate(2, '/reminders clear'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), []);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [0]);
 
     await handleUpdate(messageUpdate(3, '/start'), deps);
     assert.deepEqual(
       await harness.repository.listReminderOffsets(USER_ID),
+      [0],
+      'reactivating an existing user must not restore lead-time defaults',
+    );
+  });
+
+  it('turns the at-start notification on and off through /reminders start', async () => {
+    const harness = createHarness();
+    const deps = handlerDeps(harness);
+    await handleUpdate(messageUpdate(1, '/start'), deps);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
+
+    await handleUpdate(messageUpdate(2, '/reminders start off'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [1440, 60, 5],
+      'only the at-start notification is removed',
+    );
+    assert.match(lastJobPayload(harness).text ?? '', /В момент начала: выключено/);
+
+    await handleUpdate(messageUpdate(3, '/reminders start off'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [1440, 60, 5],
+      'repeating off is idempotent',
+    );
+
+    await handleUpdate(messageUpdate(4, '/reminders start on'), deps);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
+    assert.match(lastJobPayload(harness).text ?? '', /В момент начала: включено/);
+
+    await handleUpdate(messageUpdate(5, '/reminders del 0'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [1440, 60, 5, 0],
+      'del cannot remove the at-start offset',
+    );
+    await handleUpdate(messageUpdate(6, '/reminders edit 0 30'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [1440, 60, 5, 0],
+      'edit cannot touch the at-start offset',
+    );
+  });
+
+  it('start off is the only way to turn the at-start notification off', async () => {
+    const harness = createHarness();
+    const deps = handlerDeps(harness);
+    await handleUpdate(messageUpdate(1, '/start'), deps);
+
+    await handleUpdate(messageUpdate(2, '/reminders clear'), deps);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [0]);
+
+    await handleUpdate(callbackUpdate(3, 'rm:clear'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [0],
+      'the clear callback preserves the at-start notification too',
+    );
+
+    await handleUpdate(messageUpdate(4, '/reminders start off'), deps);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), []);
+
+    await handleUpdate(messageUpdate(5, '/reminders clear'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
       [],
-      'reactivating an existing user must not restore defaults',
+      'clear on an already empty rule set changes nothing',
     );
   });
 
@@ -414,6 +503,11 @@ describe('reminder settings command', () => {
       '/reminders del nope',
       '/reminders nonsense',
       '/reminders clear extra',
+      '/reminders start',
+      '/reminders start on off',
+      '/reminders start maybe',
+      '/reminders start 0',
+      '/reminders start on extra',
     ];
     for (const [index, text] of invalid.entries()) {
       await handleUpdate(messageUpdate(10 + index, text), deps);
@@ -434,7 +528,7 @@ describe('reminder settings command', () => {
     await handleUpdate(messageUpdate(2, '/reminders add 43200'), deps);
     assert.deepEqual(
       await harness.repository.listReminderOffsets(USER_ID),
-      [43200, 1440, 60, 5],
+      [43200, 1440, 60, 5, 0],
       'the 30-day maximum is accepted through the command',
     );
 
@@ -447,19 +541,33 @@ describe('reminder settings command', () => {
     );
   });
 
-  it('toggles standard rules and clears through callbacks', async () => {
+  it('toggles standard rules and the at-start notification through callbacks', async () => {
     const harness = createHarness();
     const deps = handlerDeps(harness);
     await handleUpdate(messageUpdate(1, '/start'), deps);
 
     await handleUpdate(callbackUpdate(2, 'rm:t:5'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 0]);
 
     await handleUpdate(callbackUpdate(3, 'rm:t:5'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
 
-    await handleUpdate(callbackUpdate(4, 'rm:clear'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), []);
+    await handleUpdate(callbackUpdate(4, 'rm:t:0'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [1440, 60, 5],
+      'the start toggle removes only offset 0',
+    );
+
+    await handleUpdate(callbackUpdate(5, 'rm:t:0'), deps);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 5, 0]);
+
+    await handleUpdate(callbackUpdate(6, 'rm:clear'), deps);
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(USER_ID),
+      [0],
+      'clear through the callback preserves the at-start notification',
+    );
   });
 
   it('a stale callback cannot mutate a set a newer command already replaced', async () => {
@@ -472,7 +580,7 @@ describe('reminder settings command', () => {
     await handleUpdate(callbackUpdate(10, 'rm:t:5'), deps);
     assert.deepEqual(
       await harness.repository.listReminderOffsets(USER_ID),
-      [1440, 60, 5],
+      [1440, 60, 5, 0],
       'the older callback is rejected by the ordering guard',
     );
   });

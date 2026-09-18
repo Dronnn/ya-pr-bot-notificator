@@ -106,4 +106,13 @@ describe('callback allowlist', () => {
     assert.equal(isAllowedCallback('course:basic; DROP TABLE users'), false);
     assert.equal(isAllowedCallback(''), false);
   });
+
+  it('accepts the at-start offset only for the toggle action', () => {
+    assert.equal(isAllowedCallback('rm:t:0'), true, 'the start toggle is allowed');
+    assert.equal(isAllowedCallback('rm:t:5'), true);
+    assert.equal(isAllowedCallback('rm:del:5'), true);
+    assert.equal(isAllowedCallback('rm:edit:5'), true);
+    assert.equal(isAllowedCallback('rm:del:0'), false, 'delete stays lead-time only');
+    assert.equal(isAllowedCallback('rm:edit:0'), false, 'edit stays lead-time only');
+  });
 });

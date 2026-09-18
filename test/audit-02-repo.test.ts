@@ -321,6 +321,7 @@ describe('send attempts count started Telegram calls', () => {
         '0006_callback_answers.sql',
         '0007_user_time_zone.sql',
         '0008_user_reminder_rules.sql',
+        '0009_start_notification.sql',
       ],
       'every migration is applied in filename order by default',
     );

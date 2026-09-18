@@ -325,6 +325,7 @@ describe('Audit 8: inactive senders never reactivate', () => {
       'course:extended',
       'rm:menu',
       'rm:t:1440',
+      'rm:t:0',
       'tz:Europe/Moscow',
       'tz:Asia/Yerevan',
     ];
@@ -346,9 +347,10 @@ describe('Audit 8: inactive senders never reactivate', () => {
     const jobsBefore = allJobs(harness).length;
 
     await handleUpdate(callbackUpdate(3, 'course:admin'), deps);
+    await handleUpdate(callbackUpdate(4, 'rm:del:0'), deps);
 
     assert.equal(allJobs(harness).length, jobsBefore);
-    assert.deepEqual(callbackAnswers(harness), ['Неизвестное действие']);
+    assert.deepEqual(callbackAnswers(harness), ['Неизвестное действие', 'Неизвестное действие']);
     assert.equal((await harness.repository.getUser(USER_ID))?.active, false);
   });
 });
@@ -365,7 +367,7 @@ describe('Audit 8: active-user behavior is unchanged', () => {
     assert.match(sentMessages(harness)[1]?.text ?? '', /Настройки:/);
 
     await handleUpdate(callbackUpdate(3, 'rm:t:5'), deps);
-    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(USER_ID), [1440, 60, 0]);
     assert.equal(await deliver(harness, queuedJobId(harness, 2)), 'sent');
     assert.match(sentMessages(harness)[2]?.text ?? '', /за сутки/);
 

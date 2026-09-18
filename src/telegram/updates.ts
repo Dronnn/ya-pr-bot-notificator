@@ -6,7 +6,10 @@
  * reason and acknowledged by the caller without side effects.
  */
 
-import { isValidReminderOffset } from '../domain/notification-policy.ts';
+import {
+  isStoredReminderOffset,
+  isValidReminderOffset,
+} from '../domain/notification-policy.ts';
 
 export interface PrivateMessageUpdate {
   kind: 'message';
@@ -171,13 +174,19 @@ export const CALLBACK_ACTIONS: readonly string[] = [
 const ALLOWED_CALLBACKS: ReadonlySet<string> = new Set(CALLBACK_ACTIONS);
 const REMINDER_CALLBACK_PATTERN = /^rm:(t|del|edit):(\d{1,7})$/;
 
-/** Whether `data` is a well-formed, in-range reminder-rule callback. */
+/**
+ * Whether `data` is a well-formed, in-range reminder-rule callback. Only the
+ * toggle may carry the at-start offset 0; delete and edit stay lead-time only.
+ */
 function isReminderCallback(data: string): boolean {
   const match = REMINDER_CALLBACK_PATTERN.exec(data);
   if (match === null) {
     return false;
   }
-  return isValidReminderOffset(Number(match[2]));
+  const offset = Number(match[2]);
+  return match[1] === 't'
+    ? isStoredReminderOffset(offset)
+    : isValidReminderOffset(offset);
 }
 
 /** Exact membership plus the validated reminder-rule pattern. */

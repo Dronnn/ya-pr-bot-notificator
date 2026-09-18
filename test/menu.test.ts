@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { processQueueMessage } from '../src/queue/consumer.ts';
 import { handleUpdate, type HandlerDeps } from '../src/telegram/handlers.ts';
 import {
+  buildRemindersKeyboard,
   HELP_TEXT,
   MENU_KEYBOARD,
   resolveMenuCommand,
@@ -87,6 +88,7 @@ function sentBodies(harness: Harness): Record<string, unknown>[] {
 describe('Menu label mapping', () => {
   it('resolves every menu label to its command and passes other text through', () => {
     assert.equal(resolveMenuCommand('Настройки'), '/settings');
+    assert.equal(resolveMenuCommand('Напоминания'), '/reminders');
     assert.equal(resolveMenuCommand('  ЧАСОВОЙ ПОЯС '), '/timezone');
     assert.equal(resolveMenuCommand('Ближайшие занятия'), '/events');
     assert.equal(resolveMenuCommand('помощь'), '/help');
@@ -123,6 +125,19 @@ describe('Menu keyboard on replies', () => {
     assert.deepEqual(payload.replyMarkup, SETTINGS_KEYBOARD);
 
     assert.equal(await deliver(harness, jobId), 'sent');
+  });
+
+  it('a Напоминания tap renders the rule set with the start state', async () => {
+    const harness = createHarness();
+    await handleUpdate(messageUpdate(1, '/start'), handlerDeps(harness));
+
+    await handleUpdate(messageUpdate(906, 'Напоминания'), handlerDeps(harness));
+    const payload = jobPayload(harness, lastJobId(harness));
+    assert.match(String(payload.text), /Напоминания \(правил: 3\):/);
+    assert.match(String(payload.text), /В момент начала: включено/);
+    assert.deepEqual(payload.replyMarkup, buildRemindersKeyboard([1440, 60, 5, 0]));
+
+    assert.equal(await deliver(harness, lastJobId(harness)), 'sent');
   });
 
   it('a Часовой пояс tap prompts the timezone choice', async () => {

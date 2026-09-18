@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   calculateReminderAt,
   evaluateDelivery,
+  MAX_REMINDER_RULES_PER_USER,
+  normalizeReminderOffsets,
+  START_REMINDER_GRACE_MS,
   type Course,
   type DeliveryInput,
   type ReminderOffsetMinutes,
@@ -13,19 +16,25 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
-const baseInput = (overrides: Partial<DeliveryInput> = {}): DeliveryInput => ({
-  nowMs: 0,
-  startsAtMs: 30 * MINUTE,
-  sendAtMs: 0,
-  nextAttemptAtMs: 0,
-  active: true,
-  userCourse: 'basic',
-  eventCourse: 'basic',
-  cancelled: false,
-  expectedRevision: 1,
-  currentRevision: 1,
-  ...overrides,
-});
+const baseInput = (overrides: Partial<DeliveryInput> = {}): DeliveryInput => {
+  const startsAtMs = overrides.startsAtMs ?? 30 * MINUTE;
+  return {
+    nowMs: 0,
+    startsAtMs,
+    // Lead-time reminders close at their own start unless a case widens the
+    // window explicitly (the at-start notification's grace is such a case).
+    expiresAtMs: startsAtMs,
+    sendAtMs: 0,
+    nextAttemptAtMs: 0,
+    active: true,
+    userCourse: 'basic',
+    eventCourse: 'basic',
+    cancelled: false,
+    expectedRevision: 1,
+    currentRevision: 1,
+    ...overrides,
+  };
+};
 
 describe('calculateReminderAt', () => {
   it('subtracts the 30 minute offset', () => {
@@ -100,6 +109,43 @@ describe('calculateReminderAt', () => {
   });
 });
 
+describe('normalizeReminderOffsets', () => {
+  it('keeps the at-start offset 0 beside lead-time rules', () => {
+    assert.deepEqual(normalizeReminderOffsets([0]), [0]);
+    assert.deepEqual(
+      normalizeReminderOffsets([60, 0, 1440]),
+      [1440, 60, 0],
+      'largest lead time first, the at-start offset last',
+    );
+    assert.deepEqual(normalizeReminderOffsets([0, 0]), [0], 'duplicates collapse');
+  });
+
+  it('does not count the at-start offset toward the rule budget', () => {
+    const leadTimes = Array.from(
+      { length: MAX_REMINDER_RULES_PER_USER },
+      (_, index) => index + 1,
+    );
+    const normalized = normalizeReminderOffsets([0, ...leadTimes]);
+    assert.equal(normalized?.length, MAX_REMINDER_RULES_PER_USER + 1);
+    assert.equal(normalized?.at(-1), 0, 'the at-start offset sorts last');
+  });
+
+  it('rejects 101 lead-time rules even when the at-start offset is present', () => {
+    const leadTimes = Array.from(
+      { length: MAX_REMINDER_RULES_PER_USER + 1 },
+      (_, index) => index + 1,
+    );
+    assert.equal(normalizeReminderOffsets(leadTimes), null);
+    assert.equal(normalizeReminderOffsets([0, ...leadTimes]), null);
+  });
+
+  it('still rejects values outside the stored range', () => {
+    assert.equal(normalizeReminderOffsets([-1]), null);
+    assert.equal(normalizeReminderOffsets([43_201]), null);
+    assert.equal(normalizeReminderOffsets([0, 30.5]), null);
+  });
+});
+
 describe('evaluateDelivery input validation', () => {
   it('rejects invalid timestamps', () => {
     for (const value of [NaN, Infinity, -Infinity, 1.5, '0']) {
@@ -117,6 +163,25 @@ describe('evaluateDelivery input validation', () => {
           baseInput({ startsAtMs: Number.MAX_SAFE_INTEGER + 1 }),
         ),
       RangeError,
+    );
+  });
+
+  it('rejects invalid expiresAtMs timestamps', () => {
+    for (const value of [NaN, Infinity, -Infinity, 1.5, '0']) {
+      assert.throws(
+        () => evaluateDelivery(baseInput({ expiresAtMs: value as unknown as number })),
+        RangeError,
+      );
+    }
+  });
+
+  it('rejects an expiry window that closes before the start but allows equality', () => {
+    assert.throws(
+      () => evaluateDelivery(baseInput({ expiresAtMs: 30 * MINUTE - 1 })),
+      RangeError,
+    );
+    assert.doesNotThrow(() =>
+      evaluateDelivery(baseInput({ expiresAtMs: 30 * MINUTE })),
     );
   });
 
@@ -199,17 +264,61 @@ describe('evaluateDelivery decisions', () => {
     );
   });
 
-  it('expires exactly at startsAtMs', () => {
+  it('sends one millisecond before the window closes', () => {
+    assert.deepEqual(
+      evaluateDelivery(baseInput({ nowMs: 30 * MINUTE - 1 })),
+      { kind: 'send' },
+    );
+  });
+
+  it('expires exactly at expiresAtMs', () => {
     assert.deepEqual(
       evaluateDelivery(baseInput({ nowMs: 30 * MINUTE })),
       { kind: 'expired' },
     );
   });
 
-  it('expires after the event started even when otherwise due', () => {
+  it('expires after the window closed even when otherwise due', () => {
     assert.deepEqual(
       evaluateDelivery(baseInput({ nowMs: 30 * MINUTE + 1 })),
       { kind: 'expired' },
+    );
+  });
+
+  it('allows the at-start notification inside its five-minute grace window', () => {
+    const atStart = {
+      startsAtMs: 30 * MINUTE,
+      expiresAtMs: 30 * MINUTE + START_REMINDER_GRACE_MS,
+      sendAtMs: 30 * MINUTE,
+    };
+    assert.deepEqual(
+      evaluateDelivery(baseInput({ ...atStart, nowMs: 30 * MINUTE })),
+      { kind: 'send' },
+    );
+    assert.deepEqual(
+      evaluateDelivery(
+        baseInput({ ...atStart, nowMs: 30 * MINUTE + START_REMINDER_GRACE_MS - 1 }),
+      ),
+      { kind: 'send' },
+    );
+    assert.deepEqual(
+      evaluateDelivery(
+        baseInput({ ...atStart, nowMs: 30 * MINUTE + START_REMINDER_GRACE_MS }),
+      ),
+      { kind: 'expired' },
+    );
+  });
+
+  it('lets a skip outrank an expired at-start notification', () => {
+    assert.deepEqual(
+      evaluateDelivery(
+        baseInput({
+          nowMs: 30 * MINUTE + 1,
+          expiresAtMs: 30 * MINUTE + START_REMINDER_GRACE_MS,
+          cancelled: true,
+        }),
+      ),
+      { kind: 'skip', reason: 'cancelled' },
     );
   });
 

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 
 import { processQueueBatch, processQueueMessage } from '../src/queue/consumer.ts';
 import type { Repository, SendReservation } from '../src/data/repository.ts';
+import { START_REMINDER_GRACE_MS } from '../src/domain/notification-policy.ts';
 import {
+  BOT_SEND_PACE_PER_SECOND,
   JOB_LEASE_MS,
   MAX_D1_STATEMENTS_PER_CONSUMER,
   MAX_JOB_ATTEMPTS,
@@ -13,7 +15,12 @@ import {
 } from '../src/util.ts';
 import { jsonResponse, textResponse } from './helpers/fakes.ts';
 import { consumerDeps, createHarness, TEST_BOT_TOKEN, type Harness } from './helpers/harness.ts';
-import { makeQueueMessage, occurrence, seedDueJobs } from './helpers/seed.ts';
+import {
+  makeQueueMessage,
+  occurrence,
+  seedDueJobs,
+  seedDueReminders,
+} from './helpers/seed.ts';
 
 async function dueReminderJob(
   harness: Harness,
@@ -345,6 +352,134 @@ describe('queue consumer', () => {
       3,
       'the cap counts real HTTP attempts, one per delivery here',
     );
+  });
+});
+
+/**
+ * Seeds an offset-0 reminder for an occurrence that starts `startOffsetMs`
+ * after now, writes the job row directly (`send_at_ms` and the retry time are
+ * the start), then advances the clock by `runOffsetMs` and claims the job.
+ */
+async function claimedStartReminder(
+  harness: Harness,
+  startOffsetMs: number,
+  runOffsetMs: number,
+): Promise<string> {
+  const now = harness.clock.now();
+  await seedDueReminders(harness, [111], {
+    startsAtMs: now + startOffsetMs,
+    reminderOffsets: [0],
+  });
+  const occurrenceId = 'basic:a#1';
+  const jobId = `rem:111:${occurrenceId}:0`;
+  const revision = Number(
+    (
+      harness.db.database.prepare('SELECT revision FROM occurrences WHERE id = ?').get(
+        occurrenceId,
+      ) as { revision: unknown }
+    ).revision,
+  );
+  // A start offset of zero makes the occurrence already due, so the planner
+  // itself may have created this row; seed only when it is absent.
+  const existing = harness.db.database
+    .prepare('SELECT 1 AS one FROM outbound_jobs WHERE id = ?')
+    .get(jobId);
+  if (existing === undefined) {
+    harness.db.database
+      .prepare(
+        `INSERT INTO outbound_jobs (
+           id, kind, telegram_user_id, chat_id, occurrence_id, reminder_offset_minutes,
+           send_at_ms, next_attempt_at_ms, status, attempt_count, expected_revision,
+           dedup_key, created_at_ms, updated_at_ms
+         ) VALUES (?, 'reminder', 111, 111, ?, 0, ?, ?, 'pending', 0, ?, ?, ?, ?)`,
+      )
+      .run(
+        jobId,
+        occurrenceId,
+        now + startOffsetMs,
+        now + startOffsetMs,
+        revision,
+        jobId,
+        now,
+        now,
+      );
+  }
+  harness.clock.advance(runOffsetMs);
+  const claimed = await harness.repository.claimDueJobs(
+    'scheduler',
+    harness.clock.now(),
+    JOB_LEASE_MS,
+    100,
+  );
+  assert.equal(claimed.length, 1, 'the at-start job must be claimable at the run instant');
+  return claimed[0]?.jobId ?? '';
+}
+
+describe('at-start reminders (offset 0)', () => {
+  const START_OFFSET_MS = 10 * MS_PER_MINUTE;
+
+  it('delivers the reminder exactly at the event start', async () => {
+    const harness = createHarness();
+    const jobId = await claimedStartReminder(harness, START_OFFSET_MS, START_OFFSET_MS);
+    const message = makeQueueMessage(jobId);
+
+    const summary = await processQueueBatch([message], consumerDeps(harness));
+
+    assert.equal(summary.sent, 1);
+    assert.equal(message.acked, true);
+    assert.equal((await harness.repository.getJob(jobId))?.status, 'sent');
+    assert.equal(sendCallCount(harness), 1);
+  });
+
+  it('delivers the reminder four minutes after the event start', async () => {
+    const harness = createHarness();
+    const jobId = await claimedStartReminder(
+      harness,
+      START_OFFSET_MS,
+      START_OFFSET_MS + 4 * MS_PER_MINUTE,
+    );
+
+    const summary = await processQueueBatch([makeQueueMessage(jobId)], consumerDeps(harness));
+
+    assert.equal(summary.sent, 1);
+    assert.equal((await harness.repository.getJob(jobId))?.status, 'sent');
+    assert.equal(sendCallCount(harness), 1);
+  });
+
+  it('expires the reminder when the grace window closes', async () => {
+    const harness = createHarness();
+    const jobId = await claimedStartReminder(
+      harness,
+      START_OFFSET_MS,
+      START_OFFSET_MS + START_REMINDER_GRACE_MS,
+    );
+
+    const summary = await processQueueBatch([makeQueueMessage(jobId)], consumerDeps(harness));
+
+    assert.equal(summary.sent, 0);
+    assert.equal(summary.terminal, 1);
+    assert.equal(sendCallCount(harness), 0);
+    const job = await harness.repository.getJob(jobId);
+    assert.equal(job?.status, 'failed');
+    assert.equal(job?.last_error_code, 'expired');
+  });
+
+  it('expires when a pace wait crosses the grace window after screening', async () => {
+    const harness = createHarness();
+    const runAtMs = START_REMINDER_GRACE_MS - 500;
+    const jobId = await claimedStartReminder(harness, 0, runAtMs);
+    const now = harness.clock.now();
+    for (let index = 0; index < BOT_SEND_PACE_PER_SECOND; index += 1) {
+      await harness.repository.acquireSendSlot(now, BOT_SEND_PACE_PER_SECOND);
+    }
+
+    const summary = await processQueueBatch([makeQueueMessage(jobId)], consumerDeps(harness));
+
+    assert.equal(harness.clock.now(), now + 1_000, 'the consumer waited out the pace window');
+    assert.equal(summary.sent, 0);
+    assert.equal(summary.terminal, 1);
+    assert.equal(sendCallCount(harness), 0);
+    assert.equal((await harness.repository.getJob(jobId))?.last_error_code, 'expired');
   });
 });
 

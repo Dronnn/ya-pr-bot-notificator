@@ -62,6 +62,8 @@
 import type { Repository, UserRecord } from '../data/repository.ts';
 import {
   MAX_REMINDER_RULES_PER_USER,
+  START_REMINDER_OFFSET_MINUTES,
+  isStoredReminderOffset,
   isValidReminderOffset,
   type Course,
   type ReminderOffsetMinutes,
@@ -157,16 +159,15 @@ function parseReminderCallback(data: string): ReminderCallback | null {
     return null;
   }
   const offset = Number(match[2]);
-  if (!isValidReminderOffset(offset)) {
-    return null;
-  }
+  // Only the toggle accepts the at-start offset 0; delete and edit stay
+  // lead-time only.
   switch (match[1]) {
     case 't':
-      return { kind: 'toggle', offset };
+      return isStoredReminderOffset(offset) ? { kind: 'toggle', offset } : null;
     case 'del':
-      return { kind: 'remove', offset };
+      return isValidReminderOffset(offset) ? { kind: 'remove', offset } : null;
     case 'edit':
-      return { kind: 'edit', offset };
+      return isValidReminderOffset(offset) ? { kind: 'edit', offset } : null;
     default:
       return null;
   }
@@ -592,9 +593,11 @@ function reminderMenuText(
 
 /**
  * Reminder-rule command (`/reminders ...`): validates and applies `add`, `del`,
- * `edit` and `clear`, cancels the user's pending reminder jobs so the next tick
- * replans from the new set, and replies with the resulting menu. Invalid input
- * replies guidance without touching any state.
+ * `edit`, `clear` and `start`, cancels the user's pending reminder jobs so the
+ * next tick replans from the new set, and replies with the resulting menu.
+ * `clear` removes only the lead-time rules and keeps the at-start notification,
+ * which is toggled solely by `start on|off`. Invalid input replies guidance
+ * without touching any state.
  */
 async function applyReminderCommand(
   deps: HandlerDeps,
@@ -628,7 +631,31 @@ async function applyReminderCommand(
         deps.now(),
         update.updateId,
       );
-      limitReached = !mutated && offsets.length >= MAX_REMINDER_RULES_PER_USER;
+      limitReached =
+        !mutated &&
+        offsets.filter((value) => value !== START_REMINDER_OFFSET_MINUTES).length >=
+          MAX_REMINDER_RULES_PER_USER;
+    }
+  } else if (sub === 'start') {
+    const mode = (tokens[1] ?? '').toLowerCase();
+    if (tokens.length !== 2 || (mode !== 'on' && mode !== 'off')) {
+      invalid = true;
+    } else if (mode === 'on') {
+      if (!offsets.includes(START_REMINDER_OFFSET_MINUTES)) {
+        mutated = await deps.repository.addReminderOffset(
+          update.userId,
+          START_REMINDER_OFFSET_MINUTES,
+          deps.now(),
+          update.updateId,
+        );
+      }
+    } else if (offsets.includes(START_REMINDER_OFFSET_MINUTES)) {
+      mutated = await deps.repository.removeReminderOffset(
+        update.userId,
+        START_REMINDER_OFFSET_MINUTES,
+        deps.now(),
+        update.updateId,
+      );
     }
   } else if (sub === 'del') {
     const offset = parseOffset(tokens[1]);
@@ -663,9 +690,11 @@ async function applyReminderCommand(
     if (tokens.length !== 1) {
       invalid = true;
     } else {
+      // Clear removes only the lead-time rules: the at-start notification is
+      // independent and survives until `/reminders start off`.
       mutated = await deps.repository.setUserReminderOffsets(
         update.userId,
-        [],
+        offsets.filter((offset) => offset === START_REMINDER_OFFSET_MINUTES),
         deps.now(),
         update.updateId,
       );
@@ -729,9 +758,10 @@ async function handleReminderCallback(
       );
       break;
     case 'clear':
+      // Same 0-preserving clear as the command form.
       mutated = await deps.repository.setUserReminderOffsets(
         update.userId,
-        [],
+        offsets.filter((offset) => offset === START_REMINDER_OFFSET_MINUTES),
         deps.now(),
         update.updateId,
       );

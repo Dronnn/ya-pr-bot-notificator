@@ -42,7 +42,12 @@
 
 import type { JobContext, Repository, SendReservation } from '../data/repository.ts';
 import { SEND_PACE_WINDOW_MS } from '../data/repository.ts';
-import { evaluateDelivery, type Course } from '../domain/notification-policy.ts';
+import {
+  evaluateDelivery,
+  START_REMINDER_GRACE_MS,
+  START_REMINDER_OFFSET_MINUTES,
+  type Course,
+} from '../domain/notification-policy.ts';
 import type { MessageBatchLike, OutboundJobMessage, QueueMessageLike } from '../platform.ts';
 import type { TelegramClient, SendOutcome, ReplyMarkup } from '../telegram/adapter.ts';
 import { buildReminderText } from '../telegram/replies.ts';
@@ -611,11 +616,12 @@ async function processCommand(
 
 /**
  * Screening result for a claimed reminder: either the job already has a
- * persisted outcome, or the reminder is deliverable from `startsAtMs`.
+ * persisted outcome, or the reminder is deliverable until its window closes
+ * (`expiresAtMs`, the occurrence start plus any at-start grace).
  */
 type ReminderScreening =
   | { readonly kind: 'finished'; readonly outcome: 'retried' | 'terminal' }
-  | { readonly kind: 'deliverable'; readonly startsAtMs: number };
+  | { readonly kind: 'deliverable'; readonly startsAtMs: number; readonly expiresAtMs: number };
 
 /**
  * Reminder eligibility, screened in rule order: recipient active, timezone
@@ -664,23 +670,28 @@ async function screenReminder(
   }
 
   const startsAtMs = context.occurrenceStartsAtMs;
+  const expiresAtMs =
+    startsAtMs +
+    (context.reminderOffsetMinutes === START_REMINDER_OFFSET_MINUTES
+      ? START_REMINDER_GRACE_MS
+      : 0);
   const sourceIsStale =
     context.sourceFetchedAtMs === null || now - context.sourceFetchedAtMs > STALE_SOURCE_CUTOFF_MS;
   if (sourceIsStale) {
-    if (now >= startsAtMs) {
+    if (now >= expiresAtMs) {
       return {
         kind: 'finished',
         outcome: await finishTerminal(deps, context, owner, 'failed', 'stale-source', now),
       };
     }
-    // Re-check the source soon, but never after the event has started.
+    // Re-check the source soon, but never after the delivery window closes.
     return {
       kind: 'finished',
       outcome: await finishRetried(
         deps,
         context,
         owner,
-        Math.min(now + MS_PER_MINUTE, startsAtMs),
+        Math.min(now + MS_PER_MINUTE, expiresAtMs),
         'stale-source',
         now,
       ),
@@ -692,6 +703,7 @@ async function screenReminder(
   const decision = evaluateDelivery({
     nowMs: now,
     startsAtMs,
+    expiresAtMs,
     sendAtMs: context.sendAtMs,
     nextAttemptAtMs: context.nextAttemptAtMs,
     // Inactive and cancelled recipients were screened above with
@@ -730,16 +742,17 @@ async function screenReminder(
       outcome: await finishTerminal(deps, context, owner, 'failed', 'expired', now),
     };
   }
-  return { kind: 'deliverable', startsAtMs };
+  return { kind: 'deliverable', startsAtMs, expiresAtMs };
 }
 
 /**
  * One reminder attempt. Screening decides whether the reminder may be sent;
  * from there the order is fixed: reserve a send slot, re-read the clock, turn
- * a started event into a terminal expiry, then reserve, format and send. The
- * text is built inside the send callback from the timezone returned by that
- * attempt's reservation, so pacing, a 429 wait or a plan-time payload can never
- * render a stale zone; changing the zone never moves the absolute instant.
+ * a closed delivery window into a terminal expiry, then reserve, format and
+ * send. The text is built inside the send callback from the timezone returned
+ * by that attempt's reservation, so pacing, a 429 wait or a plan-time payload
+ * can never render a stale zone; changing the zone never moves the absolute
+ * instant.
  */
 async function processReminder(
   deps: ConsumerDeps,
@@ -751,16 +764,17 @@ async function processReminder(
   if (screening.kind === 'finished') {
     return screening.outcome;
   }
-  const { startsAtMs } = screening;
+  const { startsAtMs, expiresAtMs } = screening;
 
   if (!(await tryReserveSendSlot(deps))) {
     return deferForPacing(deps, context, owner);
   }
   // Reserving a send slot can sleep out a full pace window, so the clock is
-  // re-read immediately before the send: at or after the start the reminder is
-  // no longer deliverable and becomes a terminal expiry instead.
+  // re-read immediately before the send: at or after the delivery window
+  // closes the reminder is no longer deliverable and becomes a terminal
+  // expiry instead.
   const sendNow = deps.now();
-  if (sendNow >= startsAtMs) {
+  if (sendNow >= expiresAtMs) {
     return finishTerminal(deps, context, owner, 'failed', 'expired', sendNow);
   }
 

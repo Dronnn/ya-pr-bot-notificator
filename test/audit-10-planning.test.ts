@@ -196,7 +196,11 @@ describe('planning proportional to the due window', () => {
     const changes = await repository.planDueReminders(now, now + EXPANSION_HORIZON_MS);
 
     assert.equal(changes, 0, 'no beyond-horizon occurrence may become a job');
-    assert.equal(recorder.records.length, 1, 'planning is one set-based statement');
+    assert.equal(
+      recorder.records.length,
+      2,
+      'planning runs one set-based statement per branch (lead times and at-start)',
+    );
     const planning = recordedPlan(recorder);
     assert.equal(
       candidateRows(recorder, planning),

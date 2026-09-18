@@ -59,7 +59,7 @@ describe('scheduler planning and claiming', () => {
     onboardUser(harness, 111);
     await harness.repository.upsertOccurrences(
       [
-        occurrence({ occurrenceKey: 'past', startsAtMs: now - MS_PER_MINUTE }),
+        occurrence({ occurrenceKey: 'past', startsAtMs: now - 10 * MS_PER_MINUTE }),
         occurrence({ occurrenceKey: 'far', startsAtMs: now + 40 * 24 * 60 * MS_PER_MINUTE }),
       ],
       now,
@@ -67,6 +67,23 @@ describe('scheduler planning and claiming', () => {
     await harness.repository.planDueReminders(now, now + EXPANSION_HORIZON_MS);
     const claimed = await harness.repository.claimDueJobs('owner', now, 60_000, 100);
     assert.equal(claimed.length, 0);
+  });
+
+  it('plans only the at-start job for an occurrence inside its grace window', async () => {
+    const harness = createHarness({ now: 1_700_000_000_000 });
+    const now = harness.clock.now();
+    await seedSource(harness.repository, 'basic', now);
+    await harness.repository.activateUser(111, 111, now);
+    onboardUser(harness, 111);
+    await harness.repository.upsertOccurrences(
+      [occurrence({ occurrenceKey: 'late', startsAtMs: now - MS_PER_MINUTE })],
+      now,
+    );
+    await harness.repository.planDueReminders(now, now + EXPANSION_HORIZON_MS);
+    const claimed = await harness.repository.claimDueJobs('owner', now, 60_000, 100);
+    assert.equal(claimed.length, 1, 'the at-start job covers a just-started occurrence');
+    const job = await harness.repository.getJob(claimed[0]?.jobId ?? '');
+    assert.equal(Number(job?.reminder_offset_minutes), 0);
   });
 
   it('updates the pending job on a material occurrence change without duplicating', async () => {

@@ -14,6 +14,9 @@ import type { OccurrenceStatus } from '../domain/calendar.ts';
 import {
   MAX_REMINDER_RULES_PER_USER,
   MAX_REMINDER_OFFSET_MINUTES,
+  START_REMINDER_GRACE_MS,
+  START_REMINDER_OFFSET_MINUTES,
+  isStoredReminderOffset,
   isValidReminderOffset,
   normalizeReminderOffsets,
   type Course,
@@ -909,11 +912,14 @@ export class Repository {
     return this.#statement(
       `INSERT OR IGNORE INTO user_reminder_offsets (telegram_user_id, offset_minutes, created_at_ms)
        SELECT ?, ?, ? WHERE ${COMMAND_CURRENT}
-         AND (SELECT COUNT(*) FROM user_reminder_offsets WHERE telegram_user_id = ?) < ?`,
+         AND (? = ${START_REMINDER_OFFSET_MINUTES}
+              OR (SELECT COUNT(*) FROM user_reminder_offsets
+                    WHERE telegram_user_id = ? AND offset_minutes > 0) < ?)`,
       telegramUserId,
       offset,
       now,
       ...this.#commandGuard(telegramUserId, commandUpdateId),
+      offset,
       telegramUserId,
       MAX_REMINDER_RULES_PER_USER,
     );
@@ -995,7 +1001,7 @@ export class Repository {
     now: number,
     commandUpdateId?: number,
   ): Promise<boolean> {
-    if (!isValidReminderOffset(offset)) {
+    if (!isStoredReminderOffset(offset)) {
       return false;
     }
     const results = await this.#batchAtomic([
@@ -1003,12 +1009,14 @@ export class Repository {
         telegramUserId,
         now,
         commandUpdateId,
-        `(SELECT COUNT(*) FROM user_reminder_offsets WHERE telegram_user_id = ?) < ?
+        `(? = ${START_REMINDER_OFFSET_MINUTES}
+            OR (SELECT COUNT(*) FROM user_reminder_offsets
+                  WHERE telegram_user_id = ? AND offset_minutes > 0) < ?)
            AND NOT EXISTS (
              SELECT 1 FROM user_reminder_offsets
              WHERE telegram_user_id = ? AND offset_minutes = ?
            )`,
-        [telegramUserId, MAX_REMINDER_RULES_PER_USER, telegramUserId, offset],
+        [offset, telegramUserId, MAX_REMINDER_RULES_PER_USER, telegramUserId, offset],
       ),
       this.#insertReminderOffsetStatement(telegramUserId, offset, now, commandUpdateId),
     ]);
@@ -1025,7 +1033,7 @@ export class Repository {
     now: number,
     commandUpdateId?: number,
   ): Promise<boolean> {
-    if (!isValidReminderOffset(offset)) {
+    if (!isStoredReminderOffset(offset)) {
       return false;
     }
     const results = await this.#batchAtomic([
@@ -1264,6 +1272,32 @@ export class Repository {
       return null;
     }
     return { owner, generation: Number(row.generation) };
+  }
+
+  /**
+   * Durable cooldown for operator alerts: returns true only when no unexpired
+   * lease with this name exists. Deliberately budget-exempt (a direct statement
+   * without `#track`): it runs in failure paths whose invocation budget may
+   * already be spent, and an alert must never fail for budget reasons. The
+   * random owner makes the row non-renewable, so the cooldown always expires.
+   */
+  async tryAcquireAdminAlertLease(name: string, now: number, ttlMs: number): Promise<boolean> {
+    const statement = this.#statement(
+      `INSERT INTO locks (name, owner, generation, expires_at_ms, updated_at_ms)
+       VALUES (?, ?, 1, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         owner = excluded.owner,
+         generation = locks.generation + 1,
+         expires_at_ms = excluded.expires_at_ms,
+         updated_at_ms = excluded.updated_at_ms
+       WHERE locks.expires_at_ms <= excluded.updated_at_ms
+       RETURNING generation`,
+      name,
+      crypto.randomUUID(),
+      now + ttlMs,
+      now,
+    );
+    return (await statement.first<{ generation: unknown }>()) !== null;
   }
 
   /** Attempt identity used for staging rows of this acquisition. */
@@ -1694,7 +1728,7 @@ export class Repository {
       "'rem:' || u.telegram_user_id || ':' || o.id || ':' || r.offset_minutes";
     const sendAtMs = `o.starts_at_ms - r.offset_minutes * ${MS_PER_MINUTE}`;
     const dueWindowEndMs = now + MAX_REMINDER_OFFSET_MINUTES * MS_PER_MINUTE;
-    return this.#changes(
+    const rules = await this.#changes(
       `INSERT INTO outbound_jobs (
          id, kind, telegram_user_id, chat_id, occurrence_id, reminder_offset_minutes,
          send_at_ms, next_attempt_at_ms, status, attempt_count, expected_revision,
@@ -1754,6 +1788,73 @@ export class Repository {
       horizonEndMs,
       dueWindowEndMs,
     );
+    // The at-start job (offset 0) is due exactly at the start, when the strict
+    // "starts in the future" predicate no longer holds. This separate statement
+    // plans it while the event is inside its delivery grace window; the
+    // lead-time statement above keeps its own index range untouched.
+    const startDedupKey = `'rem:' || u.telegram_user_id || ':' || o.id || ':${START_REMINDER_OFFSET_MINUTES}'`;
+    const start = await this.#changes(
+      `INSERT INTO outbound_jobs (
+         id, kind, telegram_user_id, chat_id, occurrence_id, reminder_offset_minutes,
+         send_at_ms, next_attempt_at_ms, status, attempt_count, expected_revision,
+         dedup_key, created_at_ms, updated_at_ms
+       )
+       SELECT
+         ${startDedupKey},
+         'reminder', u.telegram_user_id, u.chat_id, o.id, ${START_REMINDER_OFFSET_MINUTES},
+         o.starts_at_ms,
+         o.starts_at_ms,
+         'pending', 0, o.revision,
+         ${startDedupKey},
+         ?, ?
+       FROM occurrences o
+       JOIN users u ON u.course = o.course
+       JOIN user_reminder_offsets r ON r.telegram_user_id = u.telegram_user_id
+       WHERE u.active = 1
+         AND u.time_zone IS NOT NULL
+         AND o.status = 'confirmed'
+         AND r.offset_minutes = ${START_REMINDER_OFFSET_MINUTES}
+         AND o.starts_at_ms > ?
+         AND o.starts_at_ms <= ?
+         AND o.starts_at_ms <= ?
+         AND o.starts_at_ms <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM delivery_ledger l WHERE l.dedup_key = ${startDedupKey}
+         )
+       ON CONFLICT(dedup_key) DO UPDATE SET
+         send_at_ms = excluded.send_at_ms,
+         next_attempt_at_ms = CASE
+           WHEN outbound_jobs.expected_revision IS excluded.expected_revision
+             THEN outbound_jobs.next_attempt_at_ms
+           ELSE excluded.send_at_ms
+         END,
+         expected_revision = excluded.expected_revision,
+         attempt_count = CASE
+           WHEN outbound_jobs.expected_revision IS excluded.expected_revision
+             THEN outbound_jobs.attempt_count
+           ELSE 0
+         END,
+         status = 'pending',
+         lease_owner = NULL,
+         lease_expires_at_ms = NULL,
+         last_error_code = CASE
+           WHEN outbound_jobs.expected_revision IS excluded.expected_revision
+             THEN outbound_jobs.last_error_code
+           ELSE NULL
+         END,
+         updated_at_ms = excluded.updated_at_ms
+       WHERE outbound_jobs.status IN ('pending', 'cancelled')
+         AND (outbound_jobs.status = 'cancelled'
+              OR outbound_jobs.send_at_ms IS NOT excluded.send_at_ms
+              OR outbound_jobs.expected_revision IS NOT excluded.expected_revision)`,
+      now,
+      now,
+      now - START_REMINDER_GRACE_MS,
+      now,
+      horizonEndMs,
+      dueWindowEndMs,
+    );
+    return rules + start;
   }
 
   async cancelStaleJobs(now: number): Promise<number> {

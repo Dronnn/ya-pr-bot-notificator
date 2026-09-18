@@ -216,10 +216,13 @@ describe('Timezone migration 0007', () => {
 
   it('upgrade maps every existing user to Moscow and preserves all other state', async () => {
     const db = createSqliteD1();
-    const pre0007 = migrationFiles().filter(
-      (name) => name !== '0007_user_time_zone.sql' && name !== '0008_user_reminder_rules.sql',
+    const preUpgrade = migrationFiles().filter(
+      (name) =>
+        name !== '0007_user_time_zone.sql' &&
+        name !== '0008_user_reminder_rules.sql' &&
+        name !== '0009_start_notification.sql',
     );
-    applyMigrations(db, pre0007);
+    applyMigrations(db, preUpgrade);
 
     const repository = new Repository(db);
     const now = 1_700_000_000_000;
@@ -276,7 +279,11 @@ describe('Timezone migration 0007', () => {
       });
     const before = snapshot();
 
-    applyMigrations(db, ['0007_user_time_zone.sql', '0008_user_reminder_rules.sql']);
+    applyMigrations(db, [
+      '0007_user_time_zone.sql',
+      '0008_user_reminder_rules.sql',
+      '0009_start_notification.sql',
+    ]);
 
     const after = snapshot();
     assert.deepEqual(withoutUpgradedColumns(after.users), withoutUpgradedColumns(before.users));
@@ -298,11 +305,13 @@ describe('Timezone migration 0007', () => {
         [11, 1440],
         [11, 60],
         [11, 5],
+        [11, 0],
         [12, 1440],
         [12, 60],
         [12, 5],
+        [12, 0],
       ],
-      'every existing user receives exactly the three standard rules',
+      'every existing user receives the three standard rules plus the at-start offset',
     );
     db.close();
   });
@@ -364,7 +373,7 @@ describe('Timezone onboarding', () => {
       assert.equal(
         await harness.repository.planDueReminders(now, now + EXPANSION_HORIZON_MS),
         2,
-        `${data}: onboarding completion enables planning for the due default rules`,
+        `${data}: onboarding completion plans the two lead times already due; the at-start job is planned at the start tick`,
       );
       const planned = allJobs(harness).find((job) => job.kind === 'reminder');
       assert.equal(planned?.status, 'pending');

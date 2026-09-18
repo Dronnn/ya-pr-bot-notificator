@@ -345,6 +345,7 @@ describe('webhook endpoint', () => {
     const settingsJob = jobs[jobs.length - 1];
     const payload = String(settingsJob?.payload_json);
     assert.match(payload, /Настройки:/);
+    assert.match(payload, /Напоминания: .*в момент начала/);
     assert.match(payload, /course:basic/);
     assert.match(payload, /course:extended/);
   });
@@ -371,17 +372,53 @@ describe('webhook endpoint', () => {
     const harness = createHarness();
     const app = buildTestApp(harness);
     await app.fetch(webhookRequest(messageUpdate(15, '/start')));
-    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5]);
+    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5, 0]);
 
     await app.fetch(webhookRequest(callbackUpdate(16, 'rm:t:5')));
 
     assert.deepEqual(
       await harness.repository.listReminderOffsets(111),
-      [1440, 60],
+      [1440, 60, 0],
       'the toggled rule is removed',
     );
     const jobs = allJobs(harness);
     assert.match(String(jobs[jobs.length - 1]?.payload_json), /Напоминания/);
+  });
+
+  it('toggles the at-start notification through rm:t:0', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(harness);
+    await app.fetch(webhookRequest(messageUpdate(40, '/start')));
+    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5, 0]);
+
+    await app.fetch(webhookRequest(callbackUpdate(41, 'rm:t:0')));
+    assert.deepEqual(
+      await harness.repository.listReminderOffsets(111),
+      [1440, 60, 5],
+      'the start notification is the only rule removed',
+    );
+
+    await app.fetch(webhookRequest(callbackUpdate(42, 'rm:t:0')));
+    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5, 0]);
+    const jobs = allJobs(harness);
+    assert.match(String(jobs[jobs.length - 1]?.payload_json), /В момент начала: включено/);
+  });
+
+  it('rejects rm:del:0 and rm:edit:0 as unknown actions', async () => {
+    const harness = createHarness();
+    const app = buildTestApp(harness);
+    await app.fetch(webhookRequest(messageUpdate(43, '/start')));
+    const jobsBefore = allJobs(harness).length;
+
+    await app.fetch(webhookRequest(callbackUpdate(44, 'rm:del:0')));
+    await app.fetch(webhookRequest(callbackUpdate(45, 'rm:edit:0')));
+
+    assert.equal(allJobs(harness).length, jobsBefore, 'a rejected payload creates no job');
+    assert.deepEqual(await harness.repository.listReminderOffsets(111), [1440, 60, 5, 0]);
+    const ackCalls = harness.fetchSpy.calls.filter((call) =>
+      call.url.includes('/answerCallbackQuery'),
+    );
+    assert.equal(ackCalls.length, 2);
   });
 
   it('rejects an oversized request body', async () => {
